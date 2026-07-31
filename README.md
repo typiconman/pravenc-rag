@@ -5,8 +5,17 @@ corpus (Markdown of the Russian-language Orthodox Encyclopedia) into a hybrid Qd
 collection ready for cross-lingual retrieval. Metadata stays Russian-canonical;
 the query/generation stage lives in a separate step.
 
-Flow: `parse (ingest.py) → chunk (chunk.py) → embed BGE-M3 (embed.py) → Qdrant (store.py)`,
-orchestrated by `pravenc-index build` / `pravenc-index update`.
+**Pipeline:** parse (`ingest.py`) → chunk (`chunk.py`) → embed with BGE-M3
+(`embed.py`) → write to Qdrant (`store.py`), all orchestrated by the
+`pravenc-index build` / `pravenc-index update` commands.
+
+## Prerequisites
+
+- Python ≥ 3.11
+- [Docker](https://docs.docker.com/get-docker/) (to run Qdrant locally)
+- [uv](https://docs.astral.sh/uv/) (recommended) or `pip`
+- ~2 GB free disk space for the BGE-M3 model weights, plus space for the corpus
+- A CUDA GPU is optional but strongly recommended for indexing the full corpus
 
 ## Layout
 
@@ -29,37 +38,56 @@ pravenc-rag/
 
 ## Setup
 
+### 1. Fetch the corpus
+
 The corpus is a **shallow, sparse submodule** — the pinned commit records
 exactly which corpus state each index was built from (citation provenance),
 while depth-1 + sparse-checkout keeps only the current article text on disk (no
 history, no non-article dirs).
 
 ```bash
-# 1. Corpus as a shallow, sparse submodule
 git submodule add --depth 1 https://github.com/slavonic/pravenc-md data/pravenc-md
 git -C data/pravenc-md config core.sparseCheckout true
 git -C data/pravenc-md sparse-checkout set articles
+```
 
-# 2. Qdrant
+(If you're cloning this repo fresh and the submodule is already registered,
+run `git submodule update --init --depth 1` instead.)
+
+### 2. Start Qdrant
+
+```bash
 docker compose up -d
+```
 
-# 3. Install (uv recommended; pip works too)
+### 3. Install the project
+
+```bash
 uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
-`FlagEmbedding` pulls in PyTorch; a CUDA GPU makes indexing the full corpus far
-faster, but CPU works for smoke tests. First run downloads the BGE-M3 weights
-(~2 GB) from Hugging Face.
+This registers the `pravenc-index` and `pravenc-audit` CLI commands (from
+`scripts/index.py` and `scripts/audit.py`) in your virtualenv. `pip install -e .`
+works too if you don't have `uv`.
 
-## Build
+`FlagEmbedding` pulls in PyTorch; a CUDA GPU makes indexing the full corpus far
+faster, but CPU works fine for smoke tests. The first run downloads the BGE-M3
+weights (~2 GB) from Hugging Face, so make sure you have network access and
+disk space available.
+
+## Build the index
 
 ```bash
-# Survey the corpus first — extend section_types in config.yaml from this output
+# 1. Survey the corpus — lists frontmatter keys and section headings
 pravenc-audit run
 
-# Smoke-test on a handful of files, then index everything
+# 2. Extend section_types in config.yaml using that output, then smoke-test
+#    on a handful of files before committing to a full run
 pravenc-index build --limit 50
+
+# 3. Index everything (add --recreate to drop and rebuild the collection)
+pravenc-index build
 pravenc-index build --recreate
 ```
 
@@ -84,6 +112,18 @@ git add data/pravenc-md && git commit -m "reindex against corpus v2.4"
 shrunk or deleted sections leave nothing stale), then re-embeds and upserts the
 added/modified files. Committing the moved submodule pointer dates the reindex
 in your history.
+
+## Troubleshooting
+
+- **`pravenc-index build` / `pravenc-audit run` command not found** — make sure
+  you've activated the virtualenv (`source .venv/bin/activate`) and ran
+  `uv pip install -e .` in step 3 of Setup.
+- **Qdrant connection errors** — confirm the container is up with
+  `docker compose ps`, and that `qdrant_url` in `config.yaml` matches the port
+  in `docker-compose.yml` (default `http://localhost:6333`).
+- **Empty audit output / `corpus_dir` not found** — check that the submodule
+  was checked out (`ls data/pravenc-md/articles`) and that `corpus_dir` in
+  `config.yaml` points at it.
 
 ## Notes
 

@@ -22,6 +22,11 @@ app = typer.Typer(add_completion=False)
 _HEADING = re.compile(r"^#{1,6}\s+(.*)$", re.M)
 
 
+@app.callback()
+def _callback() -> None:
+    """Survey the corpus for frontmatter keys and section headings."""
+
+
 @app.command()
 def run(config: str = "config.yaml", top: int = 40) -> None:
     cfg = Config.load(config)

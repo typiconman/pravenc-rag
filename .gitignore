@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Qdrant data (docker-compose volume)
+qdrant_storage/

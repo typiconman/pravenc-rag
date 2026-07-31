@@ -1,0 +1,23 @@
+# Corpus location: clone github.com/slavonic/pravenc-md into ./data/pravenc-md
+corpus_dir: ./data/pravenc-md/articles
+
+# Qdrant (see docker-compose.yml)
+qdrant_url: http://localhost:6333
+collection: pravenc
+
+# Embedding
+embed_model: BAAI/bge-m3
+dense_dim: 1024
+batch_size: 16
+
+chunking:
+  max_tokens: 512
+  overlap_tokens: 64
+
+# Deterministic Russian-heading -> section-type map (a lookup, never MT).
+# Populate from `pravenc-audit run`. Unmapped headings become "other".
+section_types:
+  Гимнография: hymnography
+  Иконография: iconography
+  Источники: sources
+  Литература: literature

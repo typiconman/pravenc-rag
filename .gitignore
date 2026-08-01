@@ -219,3 +219,6 @@ __marimo__/
 
 # Local Qdrant data (docker-compose volume)
 qdrant_storage/
+
+# Huggingface cache (holds the embedding model weights)
+hf-cache/

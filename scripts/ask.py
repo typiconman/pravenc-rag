@@ -62,7 +62,7 @@ def check(config: str = "config.yaml") -> None:
     cfg = Config.load(config)
 
     try:
-        client = QdrantClient(url=cfg.qdrant_url)
+        client = QdrantClient(url=cfg.qdrant_url, timeout=cfg.qdrant_timeout)
         n = client.count(cfg.collection, exact=True).count
         typer.echo(f"Qdrant OK — collection '{cfg.collection}': {n} points")
     except Exception as e:  # noqa: BLE001

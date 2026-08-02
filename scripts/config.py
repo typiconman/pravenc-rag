@@ -17,7 +17,7 @@ class RetrievalConfig:
 
 @dataclass
 class LLMConfig:
-    model: str = "gemma3:b"
+    model: str = "gemma3:12b"
     ollama_url: str = "http://localhost:11434"
     num_ctx: int = 16384            # MUST exceed the retrieved context; Ollama's default truncates
     temperature: float = 0.2
@@ -34,6 +34,7 @@ class Config:
     batch_size: int
     max_tokens: int
     overlap_tokens: int
+    qdrant_timeout: float = 30.0    # httpx default (5s) is too short for on-disk-payload hybrid queries
     section_types: dict[str, str] = field(default_factory=dict)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -53,6 +54,7 @@ class Config:
             batch_size=int(data.get("batch_size", 16)),
             max_tokens=int(chunking.get("max_tokens", 512)),
             overlap_tokens=int(chunking.get("overlap_tokens", 64)),
+            qdrant_timeout=float(data.get("qdrant_timeout", 30.0)),
             section_types=data.get("section_types") or {},
             retrieval=RetrievalConfig(
                 hybrid_limit=int(r.get("hybrid_limit", 40)),

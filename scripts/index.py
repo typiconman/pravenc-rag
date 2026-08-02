@@ -103,7 +103,7 @@ def build(
     limit: int = typer.Option(0, help="Index only the first N files (0 = all)."),
 ) -> None:
     cfg = Config.load(config)
-    store = Store(cfg.qdrant_url, cfg.collection, cfg.dense_dim)
+    store = Store(cfg.qdrant_url, cfg.collection, cfg.dense_dim, cfg.qdrant_timeout)
     store.ensure_collection(recreate=recreate)
     chunker = Chunker(cfg.embed_model, cfg.max_tokens, cfg.overlap_tokens)
     embedder = Embedder(cfg.embed_model)
@@ -130,7 +130,7 @@ def update(
     cfg = Config.load(config)
     to_index, to_delete = _parse_manifest(Path(manifest).read_text(encoding="utf-8"))
 
-    store = Store(cfg.qdrant_url, cfg.collection, cfg.dense_dim)
+    store = Store(cfg.qdrant_url, cfg.collection, cfg.dense_dim, cfg.qdrant_timeout)
     store.ensure_collection(recreate=False)
 
     for stem in to_delete:

@@ -154,7 +154,7 @@ class Assistant:
         return HybridRetriever(
             self.cfg,
             embedder=Embedder(self.cfg.embed_model),
-            client=QdrantClient(url=self.cfg.qdrant_url),
+            client=QdrantClient(url=self.cfg.qdrant_url, timeout=self.cfg.qdrant_timeout),
         )
 
     @property

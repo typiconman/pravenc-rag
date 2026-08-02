@@ -11,8 +11,8 @@ from qdrant_client import QdrantClient, models
 
 
 class Store:
-    def __init__(self, url: str, collection: str, dense_dim: int = 1024):
-        self.client = QdrantClient(url=url)
+    def __init__(self, url: str, collection: str, dense_dim: int = 1024, timeout: float = 30.0):
+        self.client = QdrantClient(url=url, timeout=timeout)
         self.collection = collection
         self.dense_dim = dense_dim
 

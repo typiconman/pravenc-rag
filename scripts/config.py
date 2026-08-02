@@ -17,7 +17,7 @@ class RetrievalConfig:
 
 @dataclass
 class LLMConfig:
-    model: str = "gemma3:12b"
+    model: str = "gemma3:b"
     ollama_url: str = "http://localhost:11434"
     num_ctx: int = 16384            # MUST exceed the retrieved context; Ollama's default truncates
     temperature: float = 0.2

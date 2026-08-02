@@ -1,21 +1,28 @@
-# pravenc-rag — indexing stage
+# pravenc-rag
 
-Offline pipeline that turns the [pravenc-md](https://github.com/slavonic/pravenc-md)
-corpus (Markdown of the Russian-language Orthodox Encyclopedia) into a hybrid Qdrant
-collection ready for cross-lingual retrieval. Metadata stays Russian-canonical;
-the query/generation stage lives in a separate step.
+A RAG pipeline over [pravenc-md](https://github.com/slavonic/pravenc-md)
+(Markdown of the Russian-language Orthodox Encyclopedia): an offline indexing
+stage that builds a hybrid Qdrant collection, and an online query stage that
+answers cross-lingual questions with verified citations. Metadata stays
+Russian-canonical throughout.
 
-**Pipeline:** parse (`ingest.py`) → chunk (`chunk.py`) → embed with BGE-M3
-(`embed.py`) → write to Qdrant (`store.py`), all orchestrated by the
+**Indexing** (offline): parse (`ingest.py`) → chunk (`chunk.py`) → embed with
+BGE-M3 (`embed.py`) → write to Qdrant (`store.py`), all orchestrated by the
 `pravenc-index build` / `pravenc-index update` commands.
+
+**Query** (online): embed question → Qdrant hybrid RRF → BGE rerank → hydrate
+parent sections → Gemma 3 via Ollama → verified citations, via `pravenc-ask`.
 
 ## Prerequisites
 
 - Python ≥ 3.11
 - [Docker](https://docs.docker.com/get-docker/) (to run Qdrant locally)
 - [uv](https://docs.astral.sh/uv/) (recommended) or `pip`
-- ~2 GB free disk space for the BGE-M3 model weights, plus space for the corpus
+- [Ollama](https://ollama.com/) (to run the LLM for the query stage)
+- ~2 GB free disk space for the BGE-M3 weights, plus a few GB more for the
+  reranker and the Ollama model, plus space for the corpus
 - A CUDA GPU is optional but strongly recommended for indexing the full corpus
+  and for reranking at query time
 
 ## Layout
 
@@ -32,8 +39,12 @@ pravenc-rag/
     ├── embed.py           # BGE-M3 dense + sparse
     ├── store.py           # Qdrant hybrid collection + upsert + delete-by-doc
     ├── index.py           # `pravenc-index` CLI (build, update)
+    ├── audit.py           # `pravenc-audit` CLI (survey keys + headings)
     ├── hydrate.py         # query-stage: rebuild parent section text from source
-    └── audit.py           # `pravenc-audit` CLI (survey keys + headings)
+    ├── retrieve.py        # query-stage: hybrid search + rerank -> LlamaIndex retriever
+    ├── generate.py        # query-stage: Ollama LLM + CitationQueryEngine + verification
+    ├── app.py             # Gradio UI, served by `pravenc-ask ui`
+    └── ask.py             # `pravenc-ask` CLI (q, ui, check)
 ```
 
 ## Setup
@@ -67,9 +78,9 @@ uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
-This registers the `pravenc-index` and `pravenc-audit` CLI commands (from
-`scripts/index.py` and `scripts/audit.py`) in your virtualenv. `pip install -e .`
-works too if you don't have `uv`.
+This registers the `pravenc-index`, `pravenc-audit`, and `pravenc-ask` CLI
+commands (from `scripts/index.py`, `scripts/audit.py`, and `scripts/ask.py`)
+in your virtualenv. `pip install -e .` works too if you don't have `uv`.
 
 `FlagEmbedding` pulls in PyTorch; a CUDA GPU makes indexing the full corpus far
 faster, but CPU works fine for smoke tests. The first run downloads the BGE-M3
@@ -115,8 +126,8 @@ in your history.
 
 ## Troubleshooting
 
-- **`pravenc-index build` / `pravenc-audit run` command not found** — make sure
-  you've activated the virtualenv (`source .venv/bin/activate`) and ran
+- **`pravenc-index` / `pravenc-audit` / `pravenc-ask` command not found** — make
+  sure you've activated the virtualenv (`source .venv/bin/activate`) and ran
   `uv pip install -e .` in step 3 of Setup.
 - **Qdrant connection errors** — confirm the container is up with
   `docker compose ps`, and that `qdrant_url` in `config.yaml` matches the port
@@ -124,6 +135,10 @@ in your history.
 - **Empty audit output / `corpus_dir` not found** — check that the submodule
   was checked out (`ls data/pravenc-md/articles`) and that `corpus_dir` in
   `config.yaml` points at it.
+- **`pravenc-ask check` reports Ollama FAILED** — confirm the Ollama daemon is
+  running (`ollama list`) and that `llm.ollama_url` in `config.yaml` matches
+  where it's listening (default `http://localhost:11434`); pull the configured
+  model with `ollama pull <model>` if it's missing.
 
 ## Notes
 
@@ -143,3 +158,53 @@ in your history.
   visible rather than a silent join, with the source URL kept in `media`.
 - Re-indexing is idempotent: chunk ids map to stable Qdrant point UUIDs, so a
   rebuild overwrites points instead of duplicating them.
+
+## Query stage
+
+Install Ollama and pull the model (8.1 GB for 12b):
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull gemma3:12b        # gemma3:4b (3.3 GB) is far faster on CPU
+```
+
+Check everything is wired up, then ask:
+
+```bash
+pravenc-ask check                        # Qdrant points, Ollama models, corpus
+pravenc-ask q "Кто такой Алексий, человек Божий?"
+pravenc-ask q "Who was Alexius, Man of God?" --language en
+pravenc-ask ui                           # http://localhost:7860
+```
+
+### How the query path works
+
+1. **Encode** the question with BGE-M3 (dense + sparse). Cross-lingual, so an
+   English question retrieves Russian passages.
+2. **Hybrid search** in Qdrant: dense and sparse prefetch, fused server-side
+   with RRF, filtered to exclude bibliography sections by default.
+3. **Rerank** the top candidates with BGE-reranker-v2-m3.
+4. **Hydrate** each surviving chunk to its full parent section from the corpus
+   (nothing but child text lives in the index), deduplicating chunks that share
+   a section.
+5. **Generate** with Gemma 3 through `CitationQueryEngine`, which numbers the
+   sources and asks for `[N]` markers.
+6. **Verify** every `[N]` against the sources actually retrieved. Invented
+   markers are stripped before display and reported; an answer with no
+   citations is flagged.
+
+### Notes
+
+- **Answer language** is auto-detected from the question and can be forced.
+  Article titles stay in Cyrillic inside citations even in English answers —
+  the Russian title is the citation anchor and must stay verifiable against the
+  printed edition.
+- **`num_ctx` matters.** Ollama's default context is much smaller than Gemma 3's
+  nominal 128K and will silently truncate retrieved sections, which looks like
+  the model ignoring its sources. `llm.num_ctx` is passed through explicitly.
+- **Reranking is the CPU bottleneck** — one cross-encoder pass per candidate.
+  Lower `retrieval.rerank_candidates`, or set `use_reranker: false`, if queries
+  feel slow. Both are also toggles in the UI.
+- The index stores `doc_id` + `section_idx`, not section text, so **the corpus
+  checkout must match the commit the index was built from** or hydration
+  misaligns. Run `pravenc-index update` whenever you bump the submodule.

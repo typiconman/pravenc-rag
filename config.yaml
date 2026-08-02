@@ -58,3 +58,20 @@ section_types:
   Материальное положение: material status
   Некрополь: cemetery
 
+# ---- query stage ----
+retrieval:
+  hybrid_limit: 40          # candidates from Qdrant (cheap)
+  rerank_candidates: 20     # cross-encoder passes — the CPU bottleneck
+  top_n: 5                  # sections handed to the LLM
+  use_reranker: true
+  reranker_model: BAAI/bge-reranker-v2-m3
+  exclude_section_types: [sources, literature]
+
+llm:
+  model: gemma3:12b         # gemma3:4b for speed, gemma3:27b for quality
+  ollama_url: http://localhost:11434
+  num_ctx: 16384            # must exceed retrieved context or Ollama truncates
+  temperature: 0.2
+  request_timeout: 900
+  citation_chunk_size: 1024
+  

@@ -124,6 +124,40 @@ shrunk or deleted sections leave nothing stale), then re-embeds and upserts the
 added/modified files. Committing the moved submodule pointer dates the reindex
 in your history.
 
+## Moving the index to another machine
+
+Embedding the full corpus is the slowest step (BGE-M3 over every article), so
+if you build the index on one machine and want to query from
+another, move the built Qdrant
+**collection snapshot** instead of re-running `pravenc-index build`.
+
+On the machine that built the index:
+
+```bash
+# Create a snapshot (Qdrant writes it server-side under its storage dir)
+curl -X POST http://localhost:6333/collections/pravenc/snapshots
+
+# List snapshots to get the exact filename, then download it
+curl http://localhost:6333/collections/pravenc/snapshots
+curl -o pravenc.snapshot \
+  http://localhost:6333/collections/pravenc/snapshots/<snapshot-name>
+```
+
+Copy `pravenc.snapshot` to the target machine (`scp`, rsync, cloud storage —
+whatever fits), then, with Qdrant running there (`docker compose up -d`):
+
+```bash
+curl -X PUT http://localhost:6333/collections/pravenc/snapshots/upload \
+  -F "snapshot=@pravenc.snapshot"
+```
+
+This recreates the `pravenc` collection from the snapshot, vectors and payload
+included — no re-embedding needed. Point `qdrant_url` in `config.yaml` at
+wherever Qdrant is running (a rented GPU instance's exposed port, etc.) and
+`pravenc-ask` will query it directly; the query stage only needs the embedding
+model and reranker locally, plus Ollama for generation. If Ollama also runs on
+the remote instance, set `llm.ollama_url` accordingly too.
+
 ## Troubleshooting
 
 - **`pravenc-index` / `pravenc-audit` / `pravenc-ask` command not found** — make

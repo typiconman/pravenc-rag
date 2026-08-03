@@ -71,6 +71,15 @@ run `git submodule update --init --depth 1` instead.)
 docker compose up -d
 ```
 
+If docker is not installed, you can launch Qdrant directly, e.g.:
+
+```bash
+cd ~ && mkdir -p qdrant && cd qdrant
+curl -L https://github.com/qdrant/qdrant/releases/latest/download/qdrant-x86_64-unknown-linux-musl.tar.gz \
+  | tar xz
+./qdrant &        # serves on localhost:6333, storage in ./storage
+```
+
 ### 3. Install the project
 
 ```bash
@@ -157,6 +166,9 @@ wherever Qdrant is running (a rented GPU instance's exposed port, etc.) and
 `pravenc-ask` will query it directly; the query stage only needs the embedding
 model and reranker locally, plus Ollama for generation. If Ollama also runs on
 the remote instance, set `llm.ollama_url` accordingly too.
+
+Within this repository, a zipped snapshot sits in Releases (as long as it is
+under the 2G limit imposed by GitHub).
 
 ## Troubleshooting
 

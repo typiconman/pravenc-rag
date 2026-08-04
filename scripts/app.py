@@ -54,8 +54,8 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
             state["assistant"] = Assistant(cfg)
         return state["assistant"]
 
-    def answer(question: str, language: str, top_n: int, use_reranker: bool,
-               include_refs: bool):
+    def answer(question: str, language: str, model: str, top_n: int,
+               use_reranker: bool, include_refs: bool):
         if not question.strip():
             return "", "", ""
         a = assistant()
@@ -66,21 +66,21 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
             [] if include_refs else ["sources", "literature"]
         )
 
-        ans = a.ask(question, language=language)
+        ans = a.ask(question, language=language, model=model or None)
 
         notes = []
         t = ans.timing
         notes.append(
-            f"language: **{ans.language}** · embed {t['embed']:.1f}s · "
+            f"**{ans.model}** · {ans.language} · embed {t['embed']:.1f}s · "
             f"search {t['search']:.2f}s · rerank {t['rerank']:.1f}s"
         )
         if ans.dropped_citations:
             notes.append(
-                f"⚠️ dropped {len(ans.dropped_citations)} invented citation marker(s): "
+                f"⚠️ stripped {len(ans.dropped_citations)} fabricated citation(s): "
                 f"{sorted(set(ans.dropped_citations))}"
             )
         if ans.uncited:
-            notes.append("⚠️ the model returned no citations — treat with caution.")
+            notes.append("⚠️ no valid citations — treat with caution.")
         return ans.text, _format_sources(ans), " · ".join(notes)
 
     with gr.Blocks(title="Православная энциклопедия — research assistant", css=CSS) as demo:
@@ -99,6 +99,12 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
                 )
                 submit = gr.Button("Ask", variant="primary")
             with gr.Column(scale=1):
+                model = gr.Dropdown(
+                    choices=cfg.llm.models,
+                    value=cfg.llm.model if cfg.llm.model in cfg.llm.models
+                          else (cfg.llm.models[0] if cfg.llm.models else cfg.llm.model),
+                    label="Model", allow_custom_value=True,
+                )
                 language = gr.Radio(
                     ["auto", "ru", "en"], value="auto", label="Answer language"
                 )
@@ -124,7 +130,7 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
 
         gr.Examples(examples=EXAMPLES, inputs=[question, language])
 
-        inputs = [question, language, top_n, use_reranker, include_refs]
+        inputs = [question, language, model, top_n, use_reranker, include_refs]
         submit.click(answer, inputs=inputs, outputs=[out, srcs, status])
         question.submit(answer, inputs=inputs, outputs=[out, srcs, status])
 

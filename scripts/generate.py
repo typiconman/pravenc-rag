@@ -1,22 +1,26 @@
-"""Generation with Gemma 3 via Ollama, wired through CitationQueryEngine.
+"""Generation via a hosted OpenRouter model (or local Ollama), through CitationQueryEngine.
 
-Three things happen here beyond plain RAG:
+Beyond plain RAG this module does three things:
 
-* **Language control.** The answer language is chosen per query (auto-detected
-  from the question's script, or forced). Russian article titles stay in
-  Cyrillic in citations even when the prose is English — the Russian title is
-  the citation anchor and must remain verifiable against the printed edition.
+* **Language control.** Answer language is per-query (auto-detected or forced).
+  Russian article titles stay Cyrillic in citations even in English answers —
+  the Russian title is the citation anchor and must stay verifiable.
 
-* **Citation grounding.** ``CitationQueryEngine`` numbers the sources it feeds
-  the model and asks for ``[N]`` markers.
+* **Citation grounding.** ``CitationQueryEngine`` numbers the retrieved sources
+  and asks for ``[N]`` markers.
 
-* **Citation verification.** The model's ``[N]`` markers are checked against
-  the sources actually retrieved; out-of-range (invented) markers are stripped
-  before the answer is shown. This is what makes "always cites" true rather
-  than "usually cites".
+* **Citation verification.** Every bracketed marker the model emits is checked
+  against the sources actually retrieved. Anything that is not a valid in-range
+  ``[N]`` — an out-of-range number, ``[New Source]``, ``[Author, pages]``,
+  ``[4, 5]`` — is stripped and reported. Smaller/looser models fabricate exactly
+  these; stripping them is what keeps "always cites" honest.
+
+Provider and model are set in config; ``ask(..., model=...)`` overrides the
+model per call so the UI and ``compare`` can pit models against each other.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -27,7 +31,8 @@ from .config import Config
 from .retrieve import HybridRetriever
 
 _CYRILLIC = re.compile(r"[\u0400-\u04FF]")
-_CITE = re.compile(r"\[(\d+)\]")
+# Any bracketed token, so we can judge each one — not just well-formed [N].
+_CITE_ANY = re.compile(r"\[([^\[\]]+)\]")
 
 LANG_NAMES = {"ru": "Russian", "en": "English"}
 
@@ -35,11 +40,9 @@ LANG_NAMES = {"ru": "Russian", "en": "English"}
 def detect_language(text: str) -> str:
     """Answer in the language the question was asked in.
 
-    Script ratio decides when it is clear-cut. Queries here are often mixed —
-    an English question quoting Cyrillic article titles or section headings —
-    so in the ambiguous middle the opening word decides, since that is what
-    sets a question's language. Genuinely ambiguous cases are why the UI keeps
-    an explicit ru/en override.
+    Script ratio decides when clear-cut; in the mixed middle (an English
+    question quoting Cyrillic titles) the opening word decides. The UI keeps an
+    explicit ru/en override for genuinely ambiguous cases.
     """
     letters = [c for c in text if c.isalpha()]
     if not letters:
@@ -68,10 +71,13 @@ def _qa_template(lang: str) -> PromptTemplate:
         "the question, say so plainly rather than drawing on outside knowledge.\n"
         "- Cite every factual claim with the source number in square brackets, "
         "e.g. [1] or [2][3]. Every paragraph must carry at least one citation.\n"
+        "- Cite ONLY by bracketed source number. Never write author names, "
+        "titles, years, or the word 'Source' inside the brackets, and never "
+        "cite a number not shown above. Uncitable claims must be omitted.\n"
         "- Keep proper names, article titles and technical terms in their "
         "original Cyrillic or Greek form; you may add a transliteration in "
         "parentheses on first mention.\n"
-        "- Do not invent source numbers. Only cite sources shown above.\n\n"
+        "- Be concise: answer the question from the sources, without padding.\n\n"
         "Question: {query_str}\n"
         "Answer: "
     )
@@ -88,8 +94,9 @@ def _refine_template(lang: str) -> PromptTemplate:
         "{context_msg}\n"
         "------------\n"
         f"Rewrite the answer in {name}, keeping every citation marker accurate "
-        "and adding citations for any new material. If the new sources add "
-        "nothing, repeat the existing answer unchanged.\n"
+        "and adding citations for new material. Cite ONLY by bracketed source "
+        "number shown above — never author/title/year, never a number not "
+        "listed. If the new sources add nothing, repeat the existing answer.\n"
         "Answer: "
     )
 
@@ -111,40 +118,57 @@ class Answer:
     text: str
     sources: list[Source] = field(default_factory=list)
     language: str = "en"
-    dropped_citations: list[int] = field(default_factory=list)
+    model: str = ""
+    dropped_citations: list[str] = field(default_factory=list)  # fabricated/invalid markers
     uncited: bool = False
     timing: dict = field(default_factory=dict)
 
+    @property
+    def suspect(self) -> bool:
+        """Many fabricated markers => the model is confabulating; distrust it."""
+        return len(self.dropped_citations) >= 3 or self.uncited
 
-def _verify_citations(text: str, nodes) -> tuple[str, list[int], list[int]]:
-    """Strip invented [N] markers; return (clean_text, used, dropped)."""
+
+def _verify_citations(text: str, nodes) -> tuple[str, list[int], list[str]]:
+    """Keep only valid in-range ``[N]``; strip everything else.
+
+    Returns (clean_text, used_source_numbers, dropped_markers). Dropped markers
+    are returned as strings so callers can show exactly what was fabricated
+    (e.g. ``New Source``, ``Arrance, 130-131``, ``4, 5``, ``Source 9``).
+
+    Note: this strips ANY non-conforming bracketed text, so a legitimate
+    non-citation like "[sic]" would go too — acceptable here, where brackets in
+    an answer are effectively always citations, and leaving fabricated ones is
+    the far worse failure.
+    """
     n_sources = len(nodes)
     used: list[int] = []
-    dropped: list[int] = []
+    dropped: list[str] = []
 
     def repl(m: re.Match) -> str:
-        i = int(m.group(1))
-        if 1 <= i <= n_sources:
-            if i not in used:
-                used.append(i)
-            return m.group(0)
-        dropped.append(i)
+        body = m.group(1).strip()
+        if body.isdigit():
+            i = int(body)
+            if 1 <= i <= n_sources:
+                if i not in used:
+                    used.append(i)
+                return f"[{i}]"
+        dropped.append(body)
         return ""
 
-    clean = _CITE.sub(repl, text)
+    clean = _CITE_ANY.sub(repl, text)
     clean = re.sub(r"[ \t]{2,}", " ", clean)
     clean = re.sub(r"\s+([.,;:])", r"\1", clean)
     return clean.strip(), used, dropped
 
 
 class Assistant:
-    """Query -> hybrid retrieval -> rerank -> Gemma 3 -> verified citations."""
+    """Query -> hybrid retrieval -> rerank -> hosted LLM -> verified citations."""
 
     def __init__(self, cfg: Config, retriever: HybridRetriever | None = None):
         self.cfg = cfg
         self.retriever = retriever or self._build_retriever()
-        self._llm = None
-        self._engines: dict[str, CitationQueryEngine] = {}
+        self._engines: dict[tuple[str, str], CitationQueryEngine] = {}
 
     def _build_retriever(self) -> HybridRetriever:
         from qdrant_client import QdrantClient
@@ -157,41 +181,58 @@ class Assistant:
             client=QdrantClient(url=self.cfg.qdrant_url, timeout=self.cfg.qdrant_timeout),
         )
 
-    @property
-    def llm(self):
-        if self._llm is None:
+    def _build_llm(self, model: str):
+        """Construct the LLM for a given model string, honoring cfg.llm.provider."""
+        c = self.cfg.llm
+        if c.provider == "ollama":
             from llama_index.llms.ollama import Ollama
 
-            c = self.cfg.llm
-            self._llm = Ollama(
-                model=c.model,
+            return Ollama(
+                model=model,
                 base_url=c.ollama_url,
                 request_timeout=c.request_timeout,
                 context_window=c.num_ctx,
                 temperature=c.temperature,
-                # num_ctx must be passed through to Ollama explicitly: its own
-                # default is far smaller than 128K and will silently truncate
-                # the retrieved sections, which reads as the model "ignoring"
-                # context.
                 additional_kwargs={"num_ctx": c.num_ctx},
             )
-        return self._llm
 
-    def _engine(self, lang: str) -> CitationQueryEngine:
-        if lang not in self._engines:
-            self._engines[lang] = CitationQueryEngine.from_args(
+        # OpenRouter / any OpenAI-compatible host
+        from llama_index.llms.openai_like import OpenAILike
+
+        api_key = os.environ.get(c.api_key_env)
+        if not api_key:
+            raise RuntimeError(
+                f"Environment variable {c.api_key_env} is not set — export your "
+                f"{c.provider} API key before querying."
+            )
+        return OpenAILike(
+            model=model,
+            api_base=c.api_base,
+            api_key=api_key,
+            is_chat_model=True,
+            context_window=c.num_ctx,
+            temperature=c.temperature,
+            timeout=c.request_timeout,
+            max_retries=2,
+        )
+
+    def _engine(self, lang: str, model: str) -> CitationQueryEngine:
+        key = (lang, model)
+        if key not in self._engines:
+            self._engines[key] = CitationQueryEngine.from_args(
                 index=None,
                 retriever=self.retriever,
-                llm=self.llm,
+                llm=self._build_llm(model),
                 citation_chunk_size=self.cfg.llm.citation_chunk_size,
                 citation_qa_template=_qa_template(lang),
                 citation_refine_template=_refine_template(lang),
             )
-        return self._engines[lang]
+        return self._engines[key]
 
-    def ask(self, question: str, language: str = "auto") -> Answer:
+    def ask(self, question: str, language: str = "auto", model: str | None = None) -> Answer:
         lang = detect_language(question) if language == "auto" else language
-        response = self._engine(lang).query(question)
+        model = model or self.cfg.llm.model
+        response = self._engine(lang, model).query(question)
 
         nodes = response.source_nodes
         clean, used, dropped = _verify_citations(str(response), nodes)
@@ -217,6 +258,7 @@ class Assistant:
             text=clean,
             sources=sources,
             language=lang,
+            model=model,
             dropped_citations=dropped,
             uncited=not used and bool(nodes),
             timing={"embed": t.embed, "search": t.search, "rerank": t.rerank},

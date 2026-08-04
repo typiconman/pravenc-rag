@@ -6,6 +6,19 @@ from pathlib import Path
 
 import yaml
 
+# Sensible starting candidates. OpenRouter's catalog changes weekly, so treat
+# these as a starting point and verify with `pravenc-ask models` (which lists
+# what's actually live for your key). Qwen leads for Russian; Gemma and
+# DeepSeek are strong alternates.
+DEFAULT_MODELS = [
+    "qwen/qwen3.6-27b",
+    "qwen/qwen3-next-80b-a3b-instruct",
+    "google/gemma-4-31b-it",
+    "deepseek/deepseek-v3",
+    "meta-llama/llama-3.3-70b-instruct",
+]
+
+
 @dataclass
 class RetrievalConfig:
     hybrid_limit: int = 40          # candidates pulled from Qdrant (fast)
@@ -15,14 +28,22 @@ class RetrievalConfig:
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     exclude_section_types: list[str] = field(default_factory=lambda: ["sources", "literature"])
 
+
 @dataclass
 class LLMConfig:
-    model: str = "gemma3:12b"
+    provider: str = "openrouter"          # "openrouter" (any OpenAI-compatible host) | "ollama"
+    model: str = "qwen/qwen3.6-27b"       # active model; a slug from `pravenc-ask models`
+    models: list[str] = field(default_factory=lambda: list(DEFAULT_MODELS))  # picker/compare set
+    # OpenAI-compatible host (OpenRouter by default; swap api_base for DeepInfra/Together/etc.)
+    api_base: str = "https://openrouter.ai/api/v1"
+    api_key_env: str = "OPENROUTER_API_KEY"
+    # Local Ollama (used only when provider == "ollama")
     ollama_url: str = "http://localhost:11434"
-    num_ctx: int = 16384            # MUST exceed the retrieved context; Ollama's default truncates
+    num_ctx: int = 16384            # context hint; for Ollama it also prevents silent truncation
     temperature: float = 0.2
     request_timeout: float = 900.0
     citation_chunk_size: int = 1024
+
 
 @dataclass
 class Config:
@@ -67,7 +88,11 @@ class Config:
                 ),
             ),
             llm=LLMConfig(
-                model=l.get("model", "gemma3:12b"),
+                provider=l.get("provider", "openrouter"),
+                model=l.get("model", "qwen/qwen3.6-27b"),
+                models=list(l.get("models") or DEFAULT_MODELS),
+                api_base=l.get("api_base", "https://openrouter.ai/api/v1"),
+                api_key_env=l.get("api_key_env", "OPENROUTER_API_KEY"),
                 ollama_url=l.get("ollama_url", "http://localhost:11434"),
                 num_ctx=int(l.get("num_ctx", 16384)),
                 temperature=float(l.get("temperature", 0.2)),

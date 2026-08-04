@@ -11,16 +11,19 @@ BGE-M3 (`embed.py`) → write to Qdrant (`store.py`), all orchestrated by the
 `pravenc-index build` / `pravenc-index update` commands.
 
 **Query** (online): embed question → Qdrant hybrid RRF → BGE rerank → hydrate
-parent sections → Gemma 3 via Ollama → verified citations, via `pravenc-ask`.
+parent sections → a hosted LLM via OpenRouter (or local Ollama) → verified
+citations, via `pravenc-ask`.
 
 ## Prerequisites
 
 - Python ≥ 3.11
 - [Docker](https://docs.docker.com/get-docker/) (to run Qdrant locally)
 - [uv](https://docs.astral.sh/uv/) (recommended) or `pip`
-- [Ollama](https://ollama.com/) (to run the LLM for the query stage)
+- An [OpenRouter](https://openrouter.ai/) API key for the query stage's LLM
+  (default provider), or [Ollama](https://ollama.com/) if you'd rather run the
+  LLM locally — see `llm.provider` in `config.yaml`
 - ~2 GB free disk space for the BGE-M3 weights, plus a few GB more for the
-  reranker and the Ollama model, plus space for the corpus
+  reranker, plus space for the corpus (and for an Ollama model, if used locally)
 - A CUDA GPU is optional but strongly recommended for indexing the full corpus
   and for reranking at query time
 
@@ -42,7 +45,7 @@ pravenc-rag/
     ├── audit.py           # `pravenc-audit` CLI (survey keys + headings)
     ├── hydrate.py         # query-stage: rebuild parent section text from source
     ├── retrieve.py        # query-stage: hybrid search + rerank -> LlamaIndex retriever
-    ├── generate.py        # query-stage: Ollama LLM + CitationQueryEngine + verification
+    ├── generate.py        # query-stage: hosted/local LLM + CitationQueryEngine + verification
     ├── app.py             # Gradio UI, served by `pravenc-ask ui`
     └── ask.py             # `pravenc-ask` CLI (q, ui, check)
 ```
@@ -164,8 +167,10 @@ This recreates the `pravenc` collection from the snapshot, vectors and payload
 included — no re-embedding needed. Point `qdrant_url` in `config.yaml` at
 wherever Qdrant is running (a rented GPU instance's exposed port, etc.) and
 `pravenc-ask` will query it directly; the query stage only needs the embedding
-model and reranker locally, plus Ollama for generation. If Ollama also runs on
-the remote instance, set `llm.ollama_url` accordingly too.
+model and reranker locally, plus network access to an LLM. With the default
+`llm.provider: openrouter` that's just an `OPENROUTER_API_KEY` export — no
+local model to move. If you use `llm.provider: ollama` instead, run Ollama on
+the remote instance and set `llm.ollama_url` accordingly.
 
 Within this repository, a zipped snapshot sits in Releases (as long as it is
 under the 2G limit imposed by GitHub).
@@ -181,10 +186,19 @@ under the 2G limit imposed by GitHub).
 - **Empty audit output / `corpus_dir` not found** — check that the submodule
   was checked out (`ls data/pravenc-md/articles`) and that `corpus_dir` in
   `config.yaml` points at it.
-- **`pravenc-ask check` reports Ollama FAILED** — confirm the Ollama daemon is
-  running (`ollama list`) and that `llm.ollama_url` in `config.yaml` matches
-  where it's listening (default `http://localhost:11434`); pull the configured
-  model with `ollama pull <model>` if it's missing.
+- **`pravenc-ask check` reports `LLM: <VAR> is not set`** — export your
+  provider's API key under the name `llm.api_key_env` in `config.yaml` points
+  at (default `OPENROUTER_API_KEY`).
+- **`pravenc-ask check` / `pravenc-ask models` reports an LLM catalog error at
+  `api_base`** — confirm the key is valid and `llm.api_base` in `config.yaml`
+  is reachable (default `https://openrouter.ai/api/v1`); model slugs on
+  OpenRouter churn, so re-run `pravenc-ask models` if `llm.model` or an entry
+  in `llm.models` comes back "not in catalog."
+- **`pravenc-ask check` reports Ollama FAILED** (only relevant with
+  `llm.provider: ollama`) — confirm the Ollama daemon is running
+  (`ollama list`) and that `llm.ollama_url` in `config.yaml` matches where it's
+  listening (default `http://localhost:11434`); pull the configured model with
+  `ollama pull <model>` if it's missing.
 
 ## Notes
 
@@ -207,7 +221,23 @@ under the 2G limit imposed by GitHub).
 
 ## Query stage
 
-Install Ollama and pull the model (8.1 GB for 12b):
+Generation runs against a **hosted LLM** by default (`llm.provider:
+openrouter` in `config.yaml`) rather than a local model — export an
+[OpenRouter](https://openrouter.ai/) API key under the variable named in
+`llm.api_key_env` (default `OPENROUTER_API_KEY`):
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+`llm.model` is the active model (a slug like `qwen/qwen3.6-27b`); `llm.models`
+is a candidate list used by the UI's model picker and by `pravenc-ask
+compare`. OpenRouter's catalog changes weekly, so treat the defaults in
+`config.yaml` as a starting point — `pravenc-ask models` lists what's actually
+live for your key.
+
+If you'd rather run the LLM locally, set `llm.provider: ollama` and pull a
+model first:
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -217,9 +247,11 @@ ollama pull gemma3:12b        # gemma3:4b (3.3 GB) is far faster on CPU
 Check everything is wired up, then ask:
 
 ```bash
-pravenc-ask check                        # Qdrant points, Ollama models, corpus
+pravenc-ask check                        # Qdrant points, LLM provider, corpus
+pravenc-ask models --filter qwen         # live model catalog for your provider
 pravenc-ask q "Кто такой Алексий, человек Божий?"
-pravenc-ask q "Who was Alexius, Man of God?" --language en
+pravenc-ask q "Who was Alexius, Man of God?" --language en --model google/gemma-4-31b-it
+pravenc-ask compare "Заменил ли канон кондак?"   # same question across llm.models
 pravenc-ask ui                           # http://localhost:7860
 ```
 
@@ -233,11 +265,13 @@ pravenc-ask ui                           # http://localhost:7860
 4. **Hydrate** each surviving chunk to its full parent section from the corpus
    (nothing but child text lives in the index), deduplicating chunks that share
    a section.
-5. **Generate** with Gemma 3 through `CitationQueryEngine`, which numbers the
-   sources and asks for `[N]` markers.
-6. **Verify** every `[N]` against the sources actually retrieved. Invented
-   markers are stripped before display and reported; an answer with no
-   citations is flagged.
+5. **Generate** with the configured LLM (hosted via OpenRouter by default, or
+   local Ollama) through `CitationQueryEngine`, which numbers the sources and
+   asks for `[N]` markers.
+6. **Verify** every bracketed marker the model emits against the sources
+   actually retrieved. Anything that isn't a valid in-range `[N]` — an
+   out-of-range number, `[New Source]`, `[Author, pages]` — is stripped and
+   reported; an answer with no valid citations is flagged.
 
 ### Notes
 
@@ -245,12 +279,21 @@ pravenc-ask ui                           # http://localhost:7860
   Article titles stay in Cyrillic inside citations even in English answers —
   the Russian title is the citation anchor and must stay verifiable against the
   printed edition.
-- **`num_ctx` matters.** Ollama's default context is much smaller than Gemma 3's
-  nominal 128K and will silently truncate retrieved sections, which looks like
-  the model ignoring its sources. `llm.num_ctx` is passed through explicitly.
+- **Model choice matters for citation discipline.** Smaller/looser models
+  fabricate citation-shaped brackets (author names, page ranges, multi-number
+  markers) more often than they invent plain out-of-range `[N]`s; `pravenc-ask
+  compare` and the `suspect` flag (3+ fabricated markers, or none at all) help
+  spot this per model.
+- **`num_ctx` matters for Ollama.** Its default context is much smaller than
+  most models' nominal window and will silently truncate retrieved sections,
+  which looks like the model ignoring its sources. `llm.num_ctx` is passed
+  through explicitly; for the OpenRouter path it's used as a context-window
+  hint rather than an enforced truncation point.
 - **Reranking is the CPU bottleneck** — one cross-encoder pass per candidate.
   Lower `retrieval.rerank_candidates`, or set `use_reranker: false`, if queries
-  feel slow. Both are also toggles in the UI.
+  feel slow. Both are also toggles in the UI. `pravenc-ask compare` re-runs
+  retrieval (and reranking) once per model, so keep the candidate list short or
+  turn the reranker off while comparing.
 - The index stores `doc_id` + `section_idx`, not section text, so **the corpus
   checkout must match the commit the index was built from** or hydration
   misaligns. Run `pravenc-index update` whenever you bump the submodule.

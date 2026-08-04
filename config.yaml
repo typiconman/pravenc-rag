@@ -68,10 +68,20 @@ retrieval:
   exclude_section_types: [sources, literature]
 
 llm:
-  model: gemma3:12b         # gemma3:4b for speed, gemma3:27b for quality
-  ollama_url: http://localhost:11434
-  num_ctx: 16384            # must exceed retrieved context or Ollama truncates
+  provider: openrouter          # openrouter (any OpenAI-compatible host) | ollama
+  model: qwen/qwen3.6-27b       # active model; a slug from `pravenc-ask models`
+  # Candidates for the UI dropdown and `pravenc-ask compare`.
+  # Slugs churn weekly — verify with `pravenc-ask models` or https://openrouter.ai/models
+  models:
+    - qwen/qwen3.6-27b                   # strong Russian; Apache-2.0
+    - qwen/qwen3-next-80b-a3b-instruct   # larger Qwen, good for RAG synthesis
+    - google/gemma-4-31b-it              # 140+ languages
+    - deepseek/deepseek-v3               # strong reasoning
+    - meta-llama/llama-3.3-70b-instruct  # general-purpose baseline
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY        # export this with your key
+  ollama_url: http://localhost:11434     # used only when provider: ollama
+  num_ctx: 16384
   temperature: 0.2
   request_timeout: 900
   citation_chunk_size: 1024
-  

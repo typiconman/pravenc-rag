@@ -130,11 +130,17 @@ class Answer:
 
 
 def _verify_citations(text: str, nodes) -> tuple[str, list[int], list[str]]:
-    """Keep only valid in-range ``[N]``; strip everything else.
+    """Keep valid ``[N]`` citations; strip fabrications.
+
+    Accepts the canonical ``[N]`` and also recovers comma-grouped citations the
+    model sometimes emits against instructions — ``[3, 4]`` becomes ``[3][4]``
+    when both numbers are in range. Within a group, out-of-range numbers are
+    dropped while valid ones are kept (``[7, 8]`` with 7 sources -> ``[7]``).
+    Anything not a bare number or comma-list of numbers — ``New Source``,
+    ``Arrance, 130-131``, ``Source 9`` — is stripped entirely.
 
     Returns (clean_text, used_source_numbers, dropped_markers). Dropped markers
-    are returned as strings so callers can show exactly what was fabricated
-    (e.g. ``New Source``, ``Arrance, 130-131``, ``4, 5``, ``Source 9``).
+    are strings so callers can show exactly what was rejected.
 
     Note: this strips ANY non-conforming bracketed text, so a legitimate
     non-citation like "[sic]" would go too — acceptable here, where brackets in
@@ -147,12 +153,20 @@ def _verify_citations(text: str, nodes) -> tuple[str, list[int], list[str]]:
 
     def repl(m: re.Match) -> str:
         body = m.group(1).strip()
-        if body.isdigit():
-            i = int(body)
-            if 1 <= i <= n_sources:
-                if i not in used:
-                    used.append(i)
-                return f"[{i}]"
+        parts = [p.strip() for p in body.split(",")]
+        # A citation group only if every part is a bare integer (e.g. "3" or "3, 4").
+        if parts and all(p.isdigit() for p in parts):
+            kept: list[int] = []
+            for p in parts:
+                i = int(p)
+                if 1 <= i <= n_sources:
+                    if i not in used:
+                        used.append(i)
+                    kept.append(i)
+                else:
+                    dropped.append(p)          # out-of-range invented number
+            return "".join(f"[{i}]" for i in kept)
+        # Non-numeric bracket content: author-year, "New Source", "Source 9", etc.
         dropped.append(body)
         return ""
 

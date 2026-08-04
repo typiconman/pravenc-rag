@@ -121,6 +121,47 @@ class HybridRetriever(BaseRetriever):
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored
 
+    def diagnose(self, question: str, rerank: bool | None = None) -> list[dict]:
+        """Return the ranked candidate pool for a query — no LLM call.
+
+        Mirrors the real selection (hybrid RRF search, optional rerank, then the
+        same (doc_id, section) dedup and top_n cutoff `_retrieve` applies) but
+        keeps every candidate and flags which ones would actually reach the LLM.
+        Use it to see whether the responsive articles are even in the pool, or
+        whether one broad article is crowding them out.
+        """
+        if rerank is not None:
+            self.cfg.retrieval.use_reranker = rerank
+        points = self._search(question)
+        scored = self._rerank(question, points)
+        used_rr = bool(self.cfg.retrieval.use_reranker and points)
+
+        rows: list[dict] = []
+        seen: set[tuple[str, int]] = set()
+        n_selected = 0
+        for rank, (point, score) in enumerate(scored, 1):
+            p = point.payload or {}
+            key = (p.get("doc_id", ""), int(p.get("section_idx", 0)))
+            selected = False
+            if key not in seen:
+                seen.add(key)
+                if n_selected < self.cfg.retrieval.top_n:
+                    selected = True
+                    n_selected += 1
+            rows.append(
+                {
+                    "rank": rank,
+                    "score": float(score) if score is not None else None,
+                    "score_kind": "rerank" if used_rr else "hybrid",
+                    "doc_id": p.get("doc_id"),
+                    "article_title": p.get("article_title") or "",
+                    "heading": p.get("heading"),
+                    "section_type": p.get("section_type"),
+                    "selected": selected,
+                }
+            )
+        return rows
+
     def _retrieve(self, query_bundle: QueryBundle) -> list[NodeWithScore]:
         question = query_bundle.query_str
         points = self._search(question)

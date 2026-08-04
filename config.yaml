@@ -63,13 +63,13 @@ retrieval:
   hybrid_limit: 40          # candidates from Qdrant (cheap)
   rerank_candidates: 20     # cross-encoder passes — the CPU bottleneck
   top_n: 5                  # sections handed to the LLM
-  use_reranker: true
+  use_reranker: false
   reranker_model: BAAI/bge-reranker-v2-m3
   exclude_section_types: [sources, literature]
 
 llm:
   provider: openrouter          # openrouter (any OpenAI-compatible host) | ollama
-  model: qwen/qwen3.6-27b       # active model; a slug from `pravenc-ask models`
+  model: google/gemma-4-31b-it       # active model; a slug from `pravenc-ask models`
   # Candidates for the UI dropdown and `pravenc-ask compare`.
   # Slugs churn weekly — verify with `pravenc-ask models` or https://openrouter.ai/models
   models:
@@ -81,7 +81,7 @@ llm:
   api_base: https://openrouter.ai/api/v1
   api_key_env: OPENROUTER_API_KEY        # export this with your key
   ollama_url: http://localhost:11434     # used only when provider: ollama
-  num_ctx: 16384
+  num_ctx: 131072        # was 16384 — hosted models have 128K–262K windows
   temperature: 0.2
   request_timeout: 900
-  citation_chunk_size: 1024
+  citation_chunk_size: 4096  # was 1024

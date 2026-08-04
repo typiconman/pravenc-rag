@@ -127,6 +127,60 @@ def models(
 
 
 @app.command()
+def retrieve(
+    question: str = typer.Argument(..., help="Query to inspect (retrieval only, no LLM)."),
+    rerank: bool = typer.Option(None, "--rerank/--no-rerank",
+                                help="Override use_reranker for this run (loads the reranker)."),
+    config: str = "config.yaml",
+) -> None:
+    """Show what retrieval surfaces for a query — ranked candidates, no generation.
+
+    '>' marks the sections that would be sent to the LLM (top_n after dedup).
+    The distinct-article summary is the quick tell: is the responsive article
+    even in the pool, or is one broad article crowding it out?
+    """
+    from collections import Counter
+
+    from qdrant_client import QdrantClient
+
+    from .embed import Embedder
+    from .retrieve import HybridRetriever
+
+    cfg = Config.load(config)
+    r = HybridRetriever(
+        cfg,
+        embedder=Embedder(cfg.embed_model),
+        client=QdrantClient(url=cfg.qdrant_url, timeout=cfg.qdrant_timeout),
+    )
+    rows = r.diagnose(question, rerank=rerank)
+    if not rows:
+        typer.echo("No candidates returned — is anything indexed and are section filters too strict?")
+        raise typer.Exit()
+
+    kind = rows[0]["score_kind"]
+    typer.echo(
+        f"\n{len(rows)} candidates ({kind} score); '>' = sent to LLM "
+        f"(top_n={cfg.retrieval.top_n}, hybrid_limit={cfg.retrieval.hybrid_limit})\n"
+    )
+    for row in rows:
+        mark = ">" if row["selected"] else " "
+        score = f"{row['score']:.4f}" if row["score"] is not None else "   -  "
+        head = f" · {row['heading']}" if row["heading"] else ""
+        typer.echo(
+            f"{mark} {row['rank']:>2}. {score}  {row['article_title']}{head}"
+            f"  [{row['section_type']}]"
+        )
+
+    arts = Counter(row["article_title"] for row in rows)
+    typer.echo(f"\nDistinct articles in pool ({len(arts)}):")
+    for title, n in arts.most_common():
+        typer.echo(f"  {n:>2}×  {title}")
+
+    t = r.last_timing
+    typer.echo(f"\n(embed {t.embed:.1f}s, search {t.search:.2f}s, rerank {t.rerank:.1f}s)")
+
+
+@app.command()
 def check(config: str = "config.yaml") -> None:
     """Confirm the index, the LLM provider, and the corpus are ready."""
     import os

@@ -199,6 +199,16 @@ under the 2G limit imposed by GitHub).
   (`ollama list`) and that `llm.ollama_url` in `config.yaml` matches where it's
   listening (default `http://localhost:11434`); pull the configured model with
   `ollama pull <model>` if it's missing.
+- **`ValueError: ... require users to upgrade torch to at least v2.6`** — this
+  repo pins `torch>=2.6` in `pyproject.toml`; if you still hit it, your
+  environment has a stale `torch` installed outside of `pip install -e .`
+  (common on prebuilt ML container images) — reinstall with `uv pip install -e
+  .` (or `pip install -e .`) to pick up the pin.
+- **`RuntimeError: operator torchvision::nms does not exist`** after upgrading
+  torch — a leftover `torchvision`, built against the old `torch`, is now ABI-
+  mismatched. This repo never uses `torchvision` (only `transformers`
+  opportunistically imports it if present); the fix is `pip uninstall -y
+  torchvision`, not trying to match versions.
 
 ## Notes
 

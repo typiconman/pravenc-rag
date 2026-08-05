@@ -1,36 +1,126 @@
-"""Section-aware, parent-child chunking.
+"""Section-aware, parent-child chunking, with retrieval-only text augmentation.
 
 Each section is the parent. Short sections become a single chunk; long ones are
 packed paragraph-by-paragraph up to ``max_tokens`` (oversized paragraphs are
-token-windowed with overlap). Every child chunk carries the full section text
-as ``parent_text`` so generation sees coherent context, and a citation payload
-built from the Russian-canonical metadata.
+token-windowed with overlap). Generation context is hydrated from the corpus at
+query time, so the index stores only the child text plus citation metadata.
+
+Two augmentations make the headword findable. The encyclopedia abbreviates each
+article's headword to a siglum inside its own article ("КОНДАК" -> "К."), so the
+defining term is nearly absent from the text that defines it — which is what
+starves the sparse/lexical channel and hurts retrieval:
+
+1. **Contextual prefix** — the article title (and section heading) are prepended
+   to each chunk, so every chunk carries its headword.
+2. **Siglum expansion** — the article's own siglum is replaced by the headword
+   lemma. Case is deliberately ignored: retrieval needs the term *present*, not
+   grammatical, which sidesteps Russian morphology entirely.
+
+Both apply ONLY to ``Chunk.text`` (the string that gets embedded).
+``payload["text"]`` keeps the original wording, so anything shown to a user or
+scored by the reranker sees the encyclopedia as written.
+
+Reference sections (Источники, Сочинения, Литература) are skipped for siglum
+expansion: they are bibliographies that spell names out rather than using the
+headword siglum, so expanding there would corrupt citations with false matches.
 """
 from __future__ import annotations
 
+import re
+
 from .models import Chunk, Document, Section
+
+CYR = "А-Яа-яЁё"
+
+# Section types / headings whose bibliographic content must not be siglum-expanded.
+NO_EXPAND_TYPES = {"sources", "literature", "works"}
+NO_EXPAND_HEADING = re.compile(
+    r"^\s*(источник|сочинен|литератур|библиогр|издани|публикац)", re.IGNORECASE
+)
+
+# Headword words that contribute no initial to a multi-word siglum.
+SIGLUM_SKIP = {"и", "во", "в", "на", "с", "со", "от", "из", "к", "о", "об",
+               "для", "при", "по", "за", "над", "под", "у", "не", "ни"}
+
+_TITLE_TOKENS = re.compile(f"[{CYR}]+")
 
 
 def _format_citation(doc: Document) -> str:
-    parts = [doc.title, "// Православная энциклопедия"]
+    """Russian bibliographic form: 'Title // Православная энциклопедия. Т. N. С. X-Y — URL'."""
+    tail = ["Православная энциклопедия"]
     if doc.volume is not None:
-        parts.append(f"Т. {doc.volume}")
+        tail.append(f"Т. {doc.volume}")
     if doc.page_numbers:
-        parts.append(f"С. {doc.page_numbers}")
-    tail = ". ".join(parts[1:])
-    cite = f"{doc.title} {('// ' + tail) if tail else ''}".strip()
+        tail.append(f"С. {doc.page_numbers}")
+    cite = f"{doc.title} // " + ". ".join(tail)
     if doc.source_url:
         cite = f"{cite} — {doc.source_url}"
     return cite
 
 
+def siglum_pattern(title: str) -> re.Pattern | None:
+    """Regex matching this article's own headword siglum in its body.
+
+    'КОНДАК' -> matches a standalone 'К.'; 'АЛЕКСИЙ, ЧЕЛОВЕК БОЖИЙ' -> matches
+    the dotted sequence 'А. ч. Б.'. Returns None if no siglum can be derived.
+
+    Casing is written into the pattern per letter rather than using
+    re.IGNORECASE, because the personal-initial guard below must stay
+    case-sensitive: initials are uppercase ("С. А. Серафимову") while ordinary
+    abbreviations are lowercase ("в 1890 г. А."), and an IGNORECASE guard would
+    mistake the latter for the former and refuse to expand.
+    """
+    letters = [w[0].upper() for w in _TITLE_TOKENS.findall(title)
+               if w.lower() not in SIGLUM_SKIP]
+    if not letters:
+        return None
+    if len(letters) == 1:
+        # Standalone uppercase letter + dot, not glued to other Cyrillic, and
+        # not part of a personal-initial run ("С. А.", "К. В.") on either side.
+        pat = (rf"(?<![{CYR}])(?<![А-ЯЁ]\.)(?<![А-ЯЁ]\.\s)"
+               rf"{re.escape(letters[0])}\.(?!\s*[А-ЯЁ]\.)(?![{CYR}])")
+    else:
+        # Multi-word sigla mix case ("А. ч. Б.", "Л. а. П."), so accept either
+        # for each letter explicitly.
+        parts = [f"[{l}{l.lower()}]" for l in letters]
+        pat = rf"(?<![{CYR}])" + r"\.\s*".join(parts) + r"\."
+    return re.compile(pat)
+
+
+def headword_lemma(title: str) -> str:
+    """Embeddable full form of the headword: 'КОНДАК' -> 'кондак'.
+
+    Nominative and lowercased on purpose — the goal is lexical presence for
+    retrieval, not grammatical agreement with the surrounding sentence.
+    """
+    return re.sub(r"\s*,\s*", " ", title.strip()).lower()
+
+
+def expandable(section: Section) -> bool:
+    """False for bibliographic sections, which don't use the headword siglum."""
+    if section.type in NO_EXPAND_TYPES:
+        return False
+    if section.heading and NO_EXPAND_HEADING.match(section.heading):
+        return False
+    return True
+
+
 class Chunker:
-    def __init__(self, model_name: str, max_tokens: int = 512, overlap_tokens: int = 64):
+    def __init__(
+        self,
+        model_name: str,
+        max_tokens: int = 512,
+        overlap_tokens: int = 64,
+        prefix_context: bool = True,
+        expand_sigla: bool = True,
+    ):
         from transformers import AutoTokenizer  # lazy: heavy import
 
         self.tok = AutoTokenizer.from_pretrained(model_name)
         self.max_tokens = max_tokens
         self.overlap = overlap_tokens
+        self.prefix_context = prefix_context
+        self.expand_sigla = expand_sigla
 
     def _ntok(self, text: str) -> int:
         return len(self.tok.encode(text, add_special_tokens=False))
@@ -67,10 +157,27 @@ class Chunker:
             chunks.append(" ".join(cur))
         return chunks or [text]
 
+    # --- retrieval-only augmentation ---------------------------------------
+    def _embed_text(
+        self, piece: str, doc: Document, section: Section,
+        pattern: re.Pattern | None, lemma: str,
+    ) -> str:
+        """Build the string actually sent to the embedder."""
+        text = piece
+        if self.expand_sigla and pattern is not None and expandable(section):
+            text = pattern.sub(lemma, text)
+        if self.prefix_context:
+            header = doc.title
+            if section.heading:
+                header = f"{header}. {section.heading}"
+            text = f"{header}\n\n{text}"
+        return text
+
     def _payload(self, doc: Document, section: Section, text: str, section_idx: int) -> dict:
         # Note: parent/section text is deliberately NOT stored here. It is
         # hydrated from the source file at query time (see hydrate.ParentHydrator),
-        # Qdrant holds only vectors, citation metadata, and the child text.
+        # so Qdrant holds only vectors, citation metadata, and the child text.
+        # "text" is the ORIGINAL wording, not the augmented embedding string.
         return {
             "doc_id": doc.id,
             "section_idx": section_idx,
@@ -87,6 +194,9 @@ class Chunker:
         }
 
     def chunk_document(self, doc: Document) -> list[Chunk]:
+        pattern = siglum_pattern(doc.title) if self.expand_sigla else None
+        lemma = headword_lemma(doc.title)
+
         out: list[Chunk] = []
         for s_idx, section in enumerate(doc.sections):
             if not section.text.strip():
@@ -96,7 +206,8 @@ class Chunker:
                     Chunk(
                         id=f"{doc.id}:{s_idx}:{c_idx}",
                         doc_id=doc.id,
-                        text=piece,
+                        # embedded: augmented; payload keeps the original
+                        text=self._embed_text(piece, doc, section, pattern, lemma),
                         parent_text=section.text,
                         section_type=section.type,
                         heading=section.heading,

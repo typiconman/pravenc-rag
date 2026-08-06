@@ -16,17 +16,22 @@ from .config import Config
 app = typer.Typer(add_completion=False)
 
 
+def _print_sources(ans) -> None:
+    if not ans.sources:
+        return
+    typer.echo("Sources:")
+    for s in ans.sources:
+        loc = ", ".join(
+            x for x in (f"т. {s.volume}" if s.volume is not None else "",
+                        f"с. {s.pages}" if s.pages else "") if x
+        )
+        typer.echo(f"  [{s.n}] {s.title}" + (f" ({loc})" if loc else ""))
+        typer.echo(f"       {s.url}")
+
+
 def _print_answer(ans) -> None:
     typer.echo("\n" + ans.text + "\n")
-    if ans.sources:
-        typer.echo("Sources:")
-        for s in ans.sources:
-            loc = ", ".join(
-                x for x in (f"т. {s.volume}" if s.volume is not None else "",
-                            f"с. {s.pages}" if s.pages else "") if x
-            )
-            typer.echo(f"  [{s.n}] {s.title}" + (f" ({loc})" if loc else ""))
-            typer.echo(f"       {s.url}")
+    _print_sources(ans)
     if ans.dropped_citations:
         typer.echo(f"\n! stripped {len(ans.dropped_citations)} fabricated citation(s): "
                    f"{sorted(set(ans.dropped_citations))}")
@@ -71,20 +76,30 @@ def compare(
 ) -> None:
     """Ask the SAME question across several models to compare their answers.
 
-    Retrieval runs once per model (the reranker cost repeats), so keep the
-    candidate list short or turn the reranker off while comparing.
+    Retrieval (embedding, hybrid search, reranking) runs ONCE and is reused for
+    every model, so comparing N models costs one retrieval + N generations.
     """
     from .generate import Assistant
 
     cfg = Config.load(config)
     model_list = [m.strip() for m in models.split(",") if m.strip()] or cfg.llm.models
-    a = Assistant(cfg)  # one retriever/embedder, reused across models
-    typer.echo(f"Comparing {len(model_list)} models on: {question!r}")
+    a = Assistant(cfg)
+
+    # Retrieve ONCE — embedding, hybrid search and reranking are
+    # model-independent, so they must not repeat per model.
+    lang, qb, nodes = a.retrieve(question, language=language)
+    t = a.retriever.last_timing
+    typer.echo(
+        f"Comparing {len(model_list)} models on: {question!r}\n"
+        f"(retrieved {len(nodes)} sources once — "
+        f"embed {t.embed:.1f}s, search {t.search:.2f}s, rerank {t.rerank:.1f}s)"
+    )
     for m in model_list:
         typer.echo("\n" + "=" * 72 + f"\nMODEL: {m}\n" + "=" * 72)
         try:
-            ans = a.ask(question, language=language, model=m)
+            ans = a.generate(qb, nodes, lang, m)
             typer.echo("\n" + ans.text + "\n")
+            _print_sources(ans)
             flag = "  ⚠ SUSPECT" if ans.suspect else ""
             typer.echo(
                 f"→ cited {len(ans.sources)} sources; "

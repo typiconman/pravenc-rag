@@ -63,7 +63,7 @@ retrieval:
   hybrid_limit: 40          # candidates from Qdrant (cheap)
   rerank_candidates: 20     # cross-encoder passes — the CPU bottleneck
   top_n: 5                  # sections handed to the LLM
-  use_reranker: false
+  use_reranker: true
   reranker_model: BAAI/bge-reranker-v2-m3
   exclude_section_types: [sources, literature]
 
@@ -76,7 +76,6 @@ llm:
     - qwen/qwen3.6-27b                   # strong Russian; Apache-2.0
     - qwen/qwen3-next-80b-a3b-instruct   # larger Qwen, good for RAG synthesis
     - google/gemma-4-31b-it              # 140+ languages
-    - deepseek/deepseek-v3               # strong reasoning
     - meta-llama/llama-3.3-70b-instruct  # general-purpose baseline
   api_base: https://openrouter.ai/api/v1
   api_key_env: OPENROUTER_API_KEY        # export this with your key

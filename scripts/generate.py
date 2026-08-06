@@ -181,6 +181,18 @@ class Assistant:
 
     def __init__(self, cfg: Config, retriever: HybridRetriever | None = None):
         self.cfg = cfg
+        # The response synthesizer builds its own PromptHelper from global
+        # Settings, NOT from the LLM we pass — its default context window is a
+        # tiny 3900 tokens, which makes CitationQueryEngine's refine loop
+        # miscompute and fail ("available context size ... not non-negative")
+        # whenever the packed sources approach that default. Point Settings at
+        # the real window so the synthesizer budgets correctly.
+        from llama_index.core import Settings
+
+        self._max_output = min(4096, max(512, cfg.llm.num_ctx // 4))
+        Settings.context_window = cfg.llm.num_ctx
+        Settings.num_output = self._max_output
+
         self.retriever = retriever or self._build_retriever()
         self._engines: dict[tuple[str, str], CitationQueryEngine] = {}
 
@@ -225,6 +237,7 @@ class Assistant:
             api_key=api_key,
             is_chat_model=True,
             context_window=c.num_ctx,
+            max_tokens=self._max_output,
             temperature=c.temperature,
             timeout=c.request_timeout,
             max_retries=2,
@@ -243,12 +256,25 @@ class Assistant:
             )
         return self._engines[key]
 
-    def ask(self, question: str, language: str = "auto", model: str | None = None) -> Answer:
-        lang = detect_language(question) if language == "auto" else language
-        model = model or self.cfg.llm.model
-        response = self._engine(lang, model).query(question)
+    def retrieve(self, question: str, language: str = "auto"):
+        """Run retrieval ONCE (embed + hybrid search + rerank + citation split).
 
-        nodes = response.source_nodes
+        Returns (lang, query_bundle, citation_nodes). Retrieval is
+        model-independent, so ``compare`` calls this once and reuses the nodes
+        across every model — the expensive rerank pass no longer repeats per
+        model.
+        """
+        from llama_index.core import QueryBundle
+
+        lang = detect_language(question) if language == "auto" else language
+        qb = QueryBundle(question)
+        # any engine retrieves identically; use the default model's.
+        nodes = self._engine(lang, self.cfg.llm.model).retrieve(qb)
+        return lang, qb, nodes
+
+    def generate(self, qb, nodes, lang: str, model: str) -> Answer:
+        """Generate + verify an answer from already-retrieved nodes (no re-retrieval)."""
+        response = self._engine(lang, model).synthesize(qb, nodes)
         clean, used, dropped = _verify_citations(str(response), nodes)
 
         sources: list[Source] = []
@@ -277,3 +303,8 @@ class Assistant:
             uncited=not used and bool(nodes),
             timing={"embed": t.embed, "search": t.search, "rerank": t.rerank},
         )
+
+    def ask(self, question: str, language: str = "auto", model: str | None = None) -> Answer:
+        model = model or self.cfg.llm.model
+        lang, qb, nodes = self.retrieve(question, language)
+        return self.generate(qb, nodes, lang, model)

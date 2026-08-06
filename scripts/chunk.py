@@ -158,26 +158,34 @@ class Chunker:
         return chunks or [text]
 
     # --- retrieval-only augmentation ---------------------------------------
-    def _embed_text(
-        self, piece: str, doc: Document, section: Section,
-        pattern: re.Pattern | None, lemma: str,
-    ) -> str:
-        """Build the string actually sent to the embedder."""
-        text = piece
+    def _expand(self, piece: str, section: Section,
+                pattern: re.Pattern | None, lemma: str) -> str:
+        """Siglum-expanded text; bibliographic sections are left untouched.
+
+        This is the string stored in the payload (what the reranker scores) and,
+        with a contextual header added, what gets embedded. The LLM sees the
+        same expansion applied to the parent section by hydrate.ParentHydrator —
+        so embedding, reranking and generation all read the headword in full,
+        never the bare siglum. Grammatical case is irrelevant to all three.
+        """
         if self.expand_sigla and pattern is not None and expandable(section):
-            text = pattern.sub(lemma, text)
-        if self.prefix_context:
-            header = doc.title
-            if section.heading:
-                header = f"{header}. {section.heading}"
-            text = f"{header}\n\n{text}"
-        return text
+            return pattern.sub(lemma, piece)
+        return piece
+
+    def _prefix(self, text: str, doc: Document, section: Section) -> str:
+        """Prepend 'Title. Heading' — a contextual header, for the embedding only."""
+        if not self.prefix_context:
+            return text
+        header = doc.title if not section.heading else f"{doc.title}. {section.heading}"
+        return f"{header}\n\n{text}"
 
     def _payload(self, doc: Document, section: Section, text: str, section_idx: int) -> dict:
-        # Note: parent/section text is deliberately NOT stored here. It is
-        # hydrated from the source file at query time (see hydrate.ParentHydrator),
-        # so Qdrant holds only vectors, citation metadata, and the child text.
-        # "text" is the ORIGINAL wording, not the augmented embedding string.
+        # Parent/section text is hydrated from the source at query time
+        # (hydrate.ParentHydrator), so Qdrant holds only vectors, citation
+        # metadata, and this child text. "text" is the SIGLUM-EXPANDED child —
+        # what the reranker scores. Citations use the separate metadata fields
+        # (article_title, volume, page_numbers, source_url), which stay original,
+        # so nothing user-facing is affected by the expansion.
         return {
             "doc_id": doc.id,
             "section_idx": section_idx,
@@ -202,16 +210,16 @@ class Chunker:
             if not section.text.strip():
                 continue
             for c_idx, piece in enumerate(self._split(section.text)):
+                expanded = self._expand(piece, section, pattern, lemma)
                 out.append(
                     Chunk(
                         id=f"{doc.id}:{s_idx}:{c_idx}",
                         doc_id=doc.id,
-                        # embedded: augmented; payload keeps the original
-                        text=self._embed_text(piece, doc, section, pattern, lemma),
+                        text=self._prefix(expanded, doc, section),  # embed: header + expansion
                         parent_text=section.text,
                         section_type=section.type,
                         heading=section.heading,
-                        payload=self._payload(doc, section, piece, s_idx),
+                        payload=self._payload(doc, section, expanded, s_idx),  # store: expansion
                     )
                 )
         return out

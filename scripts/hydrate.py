@@ -16,6 +16,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from .chunk import expandable, headword_lemma, siglum_pattern
 from .ingest import parse_article
 
 
@@ -32,9 +33,18 @@ class ParentHydrator:
 
     def parent_text(self, doc_id: str, section_idx: int) -> str:
         doc = self._document(doc_id)
-        if 0 <= section_idx < len(doc.sections):
-            return doc.sections[section_idx].text
-        return ""
+        if not (0 <= section_idx < len(doc.sections)):
+            return ""
+        section = doc.sections[section_idx]
+        text = section.text
+        # Expand the headword siglum so the LLM reads the term in full, matching
+        # what the embedder and reranker see (КОНДАК body: "К." -> "кондак").
+        # Bibliographic sections are skipped, same rule as indexing; grammatical
+        # case is irrelevant to the model.
+        pattern = siglum_pattern(doc.title)
+        if pattern is not None and expandable(section):
+            text = pattern.sub(headword_lemma(doc.title), text)
+        return text
 
     def hydrate(self, payload: dict) -> str:
         """Return the full parent-section text for a retrieved chunk payload."""

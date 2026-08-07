@@ -1,0 +1,20 @@
+# Pinned PyTorch stack for GPU pods (indexing the full corpus).
+#
+# WHY THIS FILE EXISTS: fresh pods ship a torch/torchvision pair that the
+# resolver mismatches, causing "RuntimeError: operator torchvision::nms does
+# not exist" the moment FlagEmbedding imports transformers. Installing torch
+# and torchvision TOGETHER from the same CUDA index keeps their compiled
+# extensions in lockstep. transformers>=4.51 also requires torch>=2.6 (the
+# torch.load CVE gate), so the floor is not optional.
+#
+# USAGE (run BEFORE `pip install -e .`, so this pins torch first):
+#   pip install -r requirements-gpu.txt --extra-index-url https://download.pytorch.org/whl/cu124
+#   pip install -e .
+#   python -c "import torch,torchvision; from FlagEmbedding import BGEM3FlagModel; print('cuda:', torch.cuda.is_available())"
+#
+# If the pod's driver is older than CUDA 12.4 (check `nvidia-smi`), swap cu124
+# -> cu121 in the --extra-index-url above. For a CPU-only box, use
+# requirements-cpu.txt instead.
+
+torch>=2.6,<2.9
+torchvision>=0.21,<0.24

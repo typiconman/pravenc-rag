@@ -1,0 +1,10 @@
+# Pinned PyTorch stack for CPU boxes (query stage, or CPU indexing / smoke tests).
+# Same torch/torchvision lockstep reasoning as requirements-gpu.txt, from the
+# CPU wheel index (no NVIDIA CUDA payload — far smaller, no driver to match).
+#
+# USAGE (run BEFORE `pip install -e .`):
+#   pip install -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#   pip install -e .
+
+torch>=2.6,<2.9
+torchvision>=0.21,<0.24

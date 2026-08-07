@@ -99,6 +99,40 @@ faster, but CPU works fine for smoke tests. The first run downloads the BGE-M3
 weights (~2 GB) from Hugging Face, so make sure you have network access and
 disk space available.
 
+**On a fresh pod/box, pin torch first.** Fresh GPU pods (and some prebuilt ML
+images) ship a mismatched torch/torchvision pair, which fails at import with
+`RuntimeError: operator torchvision::nms does not exist`. Install the matched
+pair from the right wheel index **before** `pip install -e .`:
+
+```bash
+# GPU pod (swap cu124 -> cu121 if `nvidia-smi` shows an older driver):
+pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu124
+# CPU box (query stage / smoke tests):
+pip install -r requirements-cpu.txt --index-url https://download.pytorch.org/whl/cpu
+# then:
+uv pip install -e .
+```
+
+Use `--index-url`, **not** `--extra-index-url`. `--extra-index-url` merely adds
+the PyTorch index alongside PyPI, and pip will happily resolve `torch` from
+PyPI's **CPU-only** wheel — you end up with a `+cpu` build that silently runs
+embedding on the CPU even when a GPU is present. `--index-url` replaces the
+default index so pip can only pull the CUDA build. If a broken/CPU pair is
+already installed, add `--force-reinstall` (or `pip uninstall -y torch
+torchvision` first).
+
+**Then verify the GPU before building** — this one line catches a `+cpu` wheel
+or a driver mismatch in seconds, instead of after hours of CPU-bound embedding:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# want e.g. '2.6.0+cu124 True'.  '+cpu' or 'False' => stop and fix before building.
+```
+
+(A `torchaudio ... requires torch==2.4.1` conflict warning from a preinstalled
+pod package is harmless — nothing here uses torchaudio; `pip uninstall -y
+torchaudio` silences it if you like.)
+
 ## Build the index
 
 ```bash
@@ -204,11 +238,24 @@ under the 2G limit imposed by GitHub).
   environment has a stale `torch` installed outside of `pip install -e .`
   (common on prebuilt ML container images) — reinstall with `uv pip install -e
   .` (or `pip install -e .`) to pick up the pin.
-- **`RuntimeError: operator torchvision::nms does not exist`** after upgrading
-  torch — a leftover `torchvision`, built against the old `torch`, is now ABI-
-  mismatched. This repo never uses `torchvision` (only `transformers`
-  opportunistically imports it if present); the fix is `pip uninstall -y
-  torchvision`, not trying to match versions.
+- **`RuntimeError: operator torchvision::nms does not exist`** — a `torchvision`
+  built against a different `torch` is ABI-mismatched (common on fresh GPU pods
+  and prebuilt ML images). Preferred fix: install the matched pair from the
+  pinned requirements file, `pip install --force-reinstall -r requirements-gpu.txt
+  --index-url https://download.pytorch.org/whl/cu124` (see step 3 of Setup) —
+  `--index-url` (not `--extra-index-url`) forces the CUDA wheels and
+  `--force-reinstall` overwrites the mismatched leftover. This repo doesn't use
+  `torchvision` directly (only `transformers` imports it opportunistically), so
+  `pip uninstall -y torchvision` is a valid quick alternative if you don't want
+  it at all.
+- **Embedding runs on CPU despite a GPU on the pod** — check
+  `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`.
+  A `+cpu` version string means pip pulled the CPU wheel from PyPI (the usual
+  cause: `--extra-index-url` instead of `--index-url`, which lets pip fall back
+  to PyPI). Reinstall with `--index-url https://download.pytorch.org/whl/cu124`.
+  If the string already shows `+cu124` but `cuda.is_available()` is `False`, the
+  pod's NVIDIA driver is older than the CUDA build — check `nvidia-smi` and drop
+  to `cu121` to match.
 
 ## Notes
 

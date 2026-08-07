@@ -58,7 +58,10 @@ def ui(config: str = "config.yaml", port: int = 7860, share: bool = False) -> No
 @app.command()
 def q(
     question: str = typer.Argument(..., help="The question to ask."),
-    language: str = typer.Option("auto", help="auto | ru | en"),
+    language: str = typer.Option(
+        "auto", help="Answer language: auto (detect from the question's script), ru, or en. "
+        "The query itself can be in any language regardless of this setting."
+    ),
     model: str = typer.Option("", help="Override the configured model (a slug from `models`)."),
     debug: bool = typer.Option(
         False, "--debug", help="Print each pipeline step as it happens: hybrid search "
@@ -78,7 +81,10 @@ def q(
 @app.command()
 def compare(
     question: str = typer.Argument(..., help="The question to run across several models."),
-    language: str = typer.Option("auto", help="auto | ru | en"),
+    language: str = typer.Option(
+        "auto", help="Answer language: auto (detect from the question's script), ru, or en. "
+        "The query itself can be in any language regardless of this setting."
+    ),
     models: str = typer.Option("", help="Comma-separated slugs; defaults to config llm.models."),
     debug: bool = typer.Option(
         False, "--debug", help="Print each pipeline step as it happens: hybrid search "

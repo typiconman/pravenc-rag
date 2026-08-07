@@ -334,10 +334,19 @@ pravenc-ask ui                           # http://localhost:7860
 
 ### Notes
 
-- **Answer language** is auto-detected from the question and can be forced.
-  Article titles stay in Cyrillic inside citations even in English answers —
-  the Russian title is the citation anchor and must stay verifiable against the
-  printed edition.
+- **`--language auto|ru|en`** (on `q`, `compare`, and as a radio button in the
+  UI) controls the language of the generated answer — not the query language,
+  which can be anything BGE-M3 embeds (retrieval is cross-lingual regardless).
+  `auto` (the default) picks by the Cyrillic-character ratio of the *question*:
+  ≥80% Cyrillic answers in Russian, ≤20% answers in English, and in the mixed
+  middle — an English question quoting a Cyrillic title, say — the language of
+  the question's first word decides. Pass `ru` or `en` explicitly to bypass
+  detection entirely, which matters for genuinely ambiguous questions or when
+  you want a consistent language across a `compare` run regardless of how the
+  question happens to be phrased. Either way, article titles inside citations
+  stay in their original Cyrillic form even in English answers — the Russian
+  title is the citation anchor and must stay verifiable against the printed
+  edition.
 - **Model choice matters for citation discipline.** Smaller/looser models
   fabricate citation-shaped brackets (author names, page ranges, multi-number
   markers) more often than they invent plain out-of-range `[N]`s; `pravenc-ask

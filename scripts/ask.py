@@ -3,7 +3,9 @@
     pravenc-ask ui                                   # launch the web UI
     pravenc-ask q "Кто такой Алексий, человек Божий?"
     pravenc-ask q "Who was Alexius?" --language en --model google/gemma-4-31b-it
+    pravenc-ask q "..." --debug                       # narrate every pipeline step
     pravenc-ask compare "Did the canon replace the kontakion?"   # same Q, many models
+    pravenc-ask retrieve "..."                        # ranked candidates, no LLM call
     pravenc-ask models --filter qwen                 # live catalog for your provider
     pravenc-ask check                                # Qdrant + LLM provider + corpus
 """
@@ -40,7 +42,8 @@ def _print_answer(ans) -> None:
     t = ans.timing
     typer.echo(
         f"\n({ans.model}; {ans.language}; embed {t['embed']:.1f}s, "
-        f"search {t['search']:.2f}s, rerank {t['rerank']:.1f}s)"
+        f"search {t['search']:.2f}s, rerank {t['rerank']:.1f}s, "
+        f"generate {t.get('generate', 0.0):.1f}s)"
     )
 
 
@@ -57,13 +60,18 @@ def q(
     question: str = typer.Argument(..., help="The question to ask."),
     language: str = typer.Option("auto", help="auto | ru | en"),
     model: str = typer.Option("", help="Override the configured model (a slug from `models`)."),
+    debug: bool = typer.Option(
+        False, "--debug", help="Print each pipeline step as it happens: hybrid search "
+        "and rerank candidates (same format as `retrieve`), then the LLM call and "
+        "citation verification."
+    ),
     config: str = "config.yaml",
 ) -> None:
     """Ask one question and print a cited answer."""
     from .generate import Assistant
 
     cfg = Config.load(config)
-    ans = Assistant(cfg).ask(question, language=language, model=model or None)
+    ans = Assistant(cfg).ask(question, language=language, model=model or None, debug=debug)
     _print_answer(ans)
 
 
@@ -72,6 +80,11 @@ def compare(
     question: str = typer.Argument(..., help="The question to run across several models."),
     language: str = typer.Option("auto", help="auto | ru | en"),
     models: str = typer.Option("", help="Comma-separated slugs; defaults to config llm.models."),
+    debug: bool = typer.Option(
+        False, "--debug", help="Print each pipeline step as it happens: hybrid search "
+        "and rerank candidates (same format as `retrieve`), then each model's LLM call "
+        "and citation verification."
+    ),
     config: str = "config.yaml",
 ) -> None:
     """Ask the SAME question across several models to compare their answers.
@@ -87,7 +100,7 @@ def compare(
 
     # Retrieve ONCE — embedding, hybrid search and reranking are
     # model-independent, so they must not repeat per model.
-    lang, qb, nodes = a.retrieve(question, language=language)
+    lang, qb, nodes = a.retrieve(question, language=language, debug=debug)
     t = a.retriever.last_timing
     typer.echo(
         f"Comparing {len(model_list)} models on: {question!r}\n"
@@ -97,7 +110,7 @@ def compare(
     for m in model_list:
         typer.echo("\n" + "=" * 72 + f"\nMODEL: {m}\n" + "=" * 72)
         try:
-            ans = a.generate(qb, nodes, lang, m)
+            ans = a.generate(qb, nodes, lang, m, debug=debug)
             typer.echo("\n" + ans.text + "\n")
             _print_sources(ans)
             flag = "  ⚠ SUSPECT" if ans.suspect else ""
@@ -159,7 +172,7 @@ def retrieve(
     from qdrant_client import QdrantClient
 
     from .embed import Embedder
-    from .retrieve import HybridRetriever
+    from .retrieve import HybridRetriever, format_rows
 
     cfg = Config.load(config)
     r = HybridRetriever(
@@ -172,19 +185,9 @@ def retrieve(
         typer.echo("No candidates returned — is anything indexed and are section filters too strict?")
         raise typer.Exit()
 
-    kind = rows[0]["score_kind"]
-    typer.echo(
-        f"\n{len(rows)} candidates ({kind} score); '>' = sent to LLM "
-        f"(top_n={cfg.retrieval.top_n}, hybrid_limit={cfg.retrieval.hybrid_limit})\n"
-    )
-    for row in rows:
-        mark = ">" if row["selected"] else " "
-        score = f"{row['score']:.4f}" if row["score"] is not None else "   -  "
-        head = f" · {row['heading']}" if row["heading"] else ""
-        typer.echo(
-            f"{mark} {row['rank']:>2}. {score}  {row['article_title']}{head}"
-            f"  [{row['section_type']}]"
-        )
+    typer.echo("")
+    for line in format_rows(rows, cfg.retrieval.top_n, cfg.retrieval.hybrid_limit):
+        typer.echo(line)
 
     arts = Counter(row["article_title"] for row in rows)
     typer.echo(f"\nDistinct articles in pool ({len(arts)}):")

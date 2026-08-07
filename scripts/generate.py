@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 from llama_index.core import PromptTemplate
@@ -256,26 +257,43 @@ class Assistant:
             )
         return self._engines[key]
 
-    def retrieve(self, question: str, language: str = "auto"):
+    def retrieve(self, question: str, language: str = "auto", debug: bool = False):
         """Run retrieval ONCE (embed + hybrid search + rerank + citation split).
 
         Returns (lang, query_bundle, citation_nodes). Retrieval is
         model-independent, so ``compare`` calls this once and reuses the nodes
         across every model — the expensive rerank pass no longer repeats per
-        model.
+        model. With ``debug=True``, the retriever prints its hybrid-search and
+        rerank candidates as they're produced (same format as `pravenc-ask
+        retrieve`).
         """
         from llama_index.core import QueryBundle
 
+        self.retriever.debug = debug
         lang = detect_language(question) if language == "auto" else language
         qb = QueryBundle(question)
         # any engine retrieves identically; use the default model's.
         nodes = self._engine(lang, self.cfg.llm.model).retrieve(qb)
         return lang, qb, nodes
 
-    def generate(self, qb, nodes, lang: str, model: str) -> Answer:
+    def generate(self, qb, nodes, lang: str, model: str, debug: bool = False) -> Answer:
         """Generate + verify an answer from already-retrieved nodes (no re-retrieval)."""
+        if debug:
+            c = self.cfg.llm
+            print(
+                f"[llm] provider={c.provider} model={model} "
+                f"context_window={c.num_ctx} temperature={c.temperature} "
+                f"sources={len(nodes)}"
+            )
+        t0 = time.perf_counter()
         response = self._engine(lang, model).synthesize(qb, nodes)
-        clean, used, dropped = _verify_citations(str(response), nodes)
+        t_generate = time.perf_counter() - t0
+        raw = str(response)
+        if debug:
+            print(f"[llm] response in {t_generate:.1f}s ({len(raw)} chars, before citation verification)")
+        clean, used, dropped = _verify_citations(raw, nodes)
+        if debug:
+            print(f"[llm] citations: kept {sorted(used)}, stripped {sorted(set(dropped))}")
 
         sources: list[Source] = []
         for i in used:
@@ -301,10 +319,12 @@ class Assistant:
             model=model,
             dropped_citations=dropped,
             uncited=not used and bool(nodes),
-            timing={"embed": t.embed, "search": t.search, "rerank": t.rerank},
+            timing={"embed": t.embed, "search": t.search, "rerank": t.rerank, "generate": t_generate},
         )
 
-    def ask(self, question: str, language: str = "auto", model: str | None = None) -> Answer:
+    def ask(
+        self, question: str, language: str = "auto", model: str | None = None, debug: bool = False
+    ) -> Answer:
         model = model or self.cfg.llm.model
-        lang, qb, nodes = self.retrieve(question, language)
-        return self.generate(qb, nodes, lang, model)
+        lang, qb, nodes = self.retrieve(question, language, debug=debug)
+        return self.generate(qb, nodes, lang, model, debug=debug)

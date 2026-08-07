@@ -47,7 +47,7 @@ pravenc-rag/
     ├── retrieve.py        # query-stage: hybrid search + rerank -> LlamaIndex retriever
     ├── generate.py        # query-stage: hosted/local LLM + CitationQueryEngine + verification
     ├── app.py             # Gradio UI, served by `pravenc-ask ui`
-    └── ask.py             # `pravenc-ask` CLI (q, ui, check)
+    └── ask.py             # `pravenc-ask` CLI (q, compare, retrieve, models, ui, check)
 ```
 
 ## Setup
@@ -309,6 +309,8 @@ pravenc-ask models --filter qwen         # live model catalog for your provider
 pravenc-ask q "Кто такой Алексий, человек Божий?"
 pravenc-ask q "Who was Alexius, Man of God?" --language en --model google/gemma-4-31b-it
 pravenc-ask compare "Заменил ли канон кондак?"   # same question across llm.models
+pravenc-ask retrieve "Кто такой Алексий, человек Божий?"   # ranked candidates, no LLM call
+pravenc-ask q "Кто такой Алексий, человек Божий?" --debug  # narrate every step live
 pravenc-ask ui                           # http://localhost:7860
 ```
 
@@ -348,9 +350,29 @@ pravenc-ask ui                           # http://localhost:7860
   hint rather than an enforced truncation point.
 - **Reranking is the CPU bottleneck** — one cross-encoder pass per candidate.
   Lower `retrieval.rerank_candidates`, or set `use_reranker: false`, if queries
-  feel slow. Both are also toggles in the UI. `pravenc-ask compare` re-runs
-  retrieval (and reranking) once per model, so keep the candidate list short or
-  turn the reranker off while comparing.
+  feel slow. Both are also toggles in the UI. `pravenc-ask compare` retrieves
+  **once** (embedding, hybrid search, reranking are model-independent) and
+  reuses that pool across every model, so comparing N models costs one
+  retrieval plus N generations, not N of each.
+- **`pravenc-ask retrieve`** runs the same retrieval pipeline as `q`/`compare`
+  but stops before generation — no LLM call, no API key needed. It prints every
+  candidate ranked by score (rerank score if `use_reranker` is on, hybrid RRF
+  score otherwise), marks with `>` the ones that would actually be sent to the
+  LLM (`top_n` after dedup by section), and summarizes distinct articles in the
+  pool. Use it to debug retrieval quality in isolation: is the article you
+  expect even in the candidate pool, or is a broad, loosely-related article
+  crowding it out? `--rerank`/`--no-rerank` overrides `use_reranker` for that
+  one run, so you can A/B whether reranking is helping for a given query
+  without touching `config.yaml`.
+- **`--debug`** (on `q` and `compare`) narrates the full pipeline live, as each
+  stage runs, instead of only printing the final answer:
+  - `[retrieve]` — the hybrid-search candidates (embed + search timing), in the
+    exact table format `pravenc-ask retrieve` uses.
+  - `[rerank]` — the reordered candidates after the cross-encoder pass (or a
+    one-line note if `use_reranker` is off), plus timing.
+  - `[llm]` — the provider, model, and context window about to be called;
+    then, after the response, its raw length and generation time; then which
+    citation markers were kept vs. stripped as fabricated.
 - The index stores `doc_id` + `section_idx`, not section text, so **the corpus
   checkout must match the commit the index was built from** or hydration
   misaligns. Run `pravenc-index update` whenever you bump the submodule.

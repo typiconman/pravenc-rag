@@ -3,8 +3,11 @@
 # CPU wheel index (no NVIDIA CUDA payload — far smaller, no driver to match).
 #
 # USAGE (run BEFORE `pip install -e .`):
-#   pip install -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-cpu.txt --index-url https://download.pytorch.org/whl/cpu
 #   pip install -e .
+#
+# Use --index-url, NOT --extra-index-url (see requirements-gpu.txt for why).
+# If a mismatched pair is already installed, add --force-reinstall.
 
 torch>=2.6,<2.9
 torchvision>=0.21,<0.24

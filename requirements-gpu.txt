@@ -8,13 +8,19 @@
 # torch.load CVE gate), so the floor is not optional.
 #
 # USAGE (run BEFORE `pip install -e .`, so this pins torch first):
-#   pip install -r requirements-gpu.txt --extra-index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements-gpu.txt --index-url https://download.pytorch.org/whl/cu124
 #   pip install -e .
-#   python -c "import torch,torchvision; from FlagEmbedding import BGEM3FlagModel; print('cuda:', torch.cuda.is_available())"
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#       -> want e.g. '2.6.0+cu124 True'.  '+cpu' or 'False' => stop and fix.
+#
+# Use --index-url, NOT --extra-index-url: --extra-index-url only ADDS the
+# PyTorch index alongside PyPI, and pip will resolve torch from PyPI's CPU-only
+# wheel (a '+cpu' build that silently runs on the CPU even with a GPU present).
+# --index-url replaces the default index so only the CUDA build is reachable.
+# If a broken/CPU pair is already installed, add --force-reinstall.
 #
 # If the pod's driver is older than CUDA 12.4 (check `nvidia-smi`), swap cu124
-# -> cu121 in the --extra-index-url above. For a CPU-only box, use
-# requirements-cpu.txt instead.
+# -> cu121 in the --index-url above. For a CPU-only box, use requirements-cpu.txt.
 
 torch>=2.6,<2.9
 torchvision>=0.21,<0.24

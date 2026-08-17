@@ -1,10 +1,37 @@
 """Typed configuration loaded from ``config.yaml``."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+
+def _load_env_file(path: Path = Path.home() / "pravenc.env") -> None:
+    """Load ``KEY=VALUE`` lines from ``~/pravenc.env`` into the environment.
+
+    Keeps secrets like ``OPENROUTER_API_KEY`` out of the repo and out of shell
+    history. A real exported variable always wins over the file (``setdefault``),
+    and a missing file is silently fine — the file is optional, not required.
+    """
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+# Run at import time: every entry point (ask.py, generate.py, app.py) imports
+# this module first, so the environment is populated before anything reads
+# os.environ.get(cfg.llm.api_key_env, ...).
+_load_env_file()
 
 # Sensible starting candidates. OpenRouter's catalog changes weekly, so treat
 # these as a starting point and verify with `pravenc-ask models` (which lists

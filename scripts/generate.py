@@ -258,9 +258,13 @@ class Assistant:
         return self._engines[key]
 
     def retrieve(self, question: str, language: str = "auto", debug: bool = False):
-        """Run retrieval ONCE (embed + hybrid search + rerank + citation split).
+        """Run retrieval ONCE (embed + hybrid search + rerank + hydrate).
 
-        Returns (lang, query_bundle, citation_nodes). Retrieval is
+        Returns (lang, query_bundle, section_nodes) — the un-split hydrated
+        parent sections. Note ``CitationQueryEngine.retrieve()`` does NOT apply
+        the citation-chunk split; that happens later, inside ``synthesize()``.
+        So these are per-section nodes, not the numbered "Source N" citation
+        chunks the LLM ultimately sees (see ``generate``). Retrieval is
         model-independent, so ``compare`` calls this once and reuses the nodes
         across every model — the expensive rerank pass no longer repeats per
         model. With ``debug=True``, the retriever prints its hybrid-search and
@@ -285,19 +289,43 @@ class Assistant:
                 f"context_window={c.num_ctx} temperature={c.temperature} "
                 f"sources={len(nodes)}"
             )
+        engine = self._engine(lang, model)
         t0 = time.perf_counter()
-        response = self._engine(lang, model).synthesize(qb, nodes)
+        response = engine.synthesize(qb, nodes)
         t_generate = time.perf_counter() - t0
         raw = str(response)
         if debug:
             print(f"[llm] response in {t_generate:.1f}s ({len(raw)} chars, before citation verification)")
-        clean, used, dropped = _verify_citations(raw, nodes)
+
+        # Resolve citations against what the LLM actually saw, not `nodes`.
+        # CitationQueryEngine.synthesize() re-splits each section into
+        # citation_chunk_size pieces and renumbers them "Source 1..N" internally;
+        # that split, renumbered list — not the un-split parent sections we were
+        # handed — is what carries the [N] markers the model emits. Rebuild the
+        # identical list here (same cached engine, same splitter, pure function
+        # of the text, so it matches synthesize()'s internal split exactly) and
+        # map citations against it. Resolving against `nodes` silently aliases
+        # every [N] onto the wrong section as soon as any earlier section spans
+        # more than one chunk, and caps n_sources too low so valid high-numbered
+        # citations get dropped as "out of range".
+        #
+        # `_create_citation_nodes` is private API — verified stable across
+        # llama-index-core 0.12-0.14.23. pyproject.toml pins accordingly
+        # (<0.15); re-verify against CitationQueryEngine before raising that cap.
+        cnodes = engine._create_citation_nodes(nodes)
+        if debug and len(cnodes) != len(nodes):
+            print(
+                f"[llm] citation split: {len(nodes)} section(s) -> "
+                f"{len(cnodes)} numbered source(s) at citation_chunk_size="
+                f"{self.cfg.llm.citation_chunk_size}"
+            )
+        clean, used, dropped = _verify_citations(raw, cnodes)
         if debug:
             print(f"[llm] citations: kept {sorted(used)}, stripped {sorted(set(dropped))}")
 
         sources: list[Source] = []
         for i in used:
-            md = nodes[i - 1].node.metadata
+            md = cnodes[i - 1].node.metadata
             sources.append(
                 Source(
                     n=i,
@@ -307,7 +335,7 @@ class Assistant:
                     pages=md.get("page_numbers"),
                     url=md.get("source_url") or "",
                     citation=md.get("citation") or "",
-                    score=nodes[i - 1].score,
+                    score=cnodes[i - 1].score,
                 )
             )
 

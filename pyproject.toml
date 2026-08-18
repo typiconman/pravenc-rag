@@ -12,7 +12,8 @@ dependencies = [
   "torch>=2.6",              # transformers refuses torch.load below 2.6 (CVE-2025-32434)
   "typer>=0.12",
   "pyyaml>=6.0",
-  "llama-index-core>=0.12",
+  "llama-index-core>=0.12,<0.15",  # generate.py calls the private CitationQueryEngine._create_citation_nodes;
+                                    # verified stable 0.12-0.14.23, re-check before raising this cap
   "llama-index-llms-ollama>=0.5",
   "llama-index-llms-openai-like>=0.3",
   "gradio>=5.0",

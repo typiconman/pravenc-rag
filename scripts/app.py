@@ -7,6 +7,8 @@ query is the slow one.
 """
 from __future__ import annotations
 
+import random
+
 import gradio as gr
 
 from .config import Config
@@ -21,6 +23,14 @@ EXAMPLES = [
     ["Кто такой Алексий, человек Божий?", "auto"],
     ["What is the hymnography of Alexius, Man of God?", "auto"],
     ["Какие источники сообщают о сирийской версии жития?", "auto"],
+]
+
+PROCESSING_MESSAGES = [
+    "Theologizing with confidence…",
+    "Pontificating…",
+    "Conducting exegesis…",
+    "Deducing boldly…",
+    "Summoning the citations…",
 ]
 
 
@@ -56,32 +66,50 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
 
     def answer(question: str, language: str, model: str, top_n: int,
                use_reranker: bool, include_refs: bool):
+        """Generator so we can show a pending state, then the result.
+
+        Yielding twice (rather than relying on Gradio's implicit per-output
+        loading indicator) is deliberate: it's the only way to guarantee a
+        pending message appears exactly once, on every submission including
+        the first, and that the Ask button is reliably disabled/re-enabled
+        around the actual work rather than around Gradio's own queue
+        bookkeeping.
+        """
         if not question.strip():
-            return "", "", ""
-        a = assistant()
-        # live knobs — applied per query without rebuilding the engine
-        a.cfg.retrieval.top_n = int(top_n)
-        a.cfg.retrieval.use_reranker = bool(use_reranker)
-        a.cfg.retrieval.exclude_section_types = (
-            [] if include_refs else ["sources", "literature"]
-        )
+            yield "", "", "", gr.update(interactive=True)
+            return
 
-        ans = a.ask(question, language=language, model=model or None)
+        # First yield: show pending state immediately and lock the button.
+        yield "", "", random.choice(PROCESSING_MESSAGES), gr.update(interactive=False)
 
-        notes = []
-        t = ans.timing
-        notes.append(
-            f"**{ans.model}** · {ans.language} · embed {t['embed']:.1f}s · "
-            f"search {t['search']:.2f}s · rerank {t['rerank']:.1f}s"
-        )
-        if ans.dropped_citations:
-            notes.append(
-                f"⚠️ stripped {len(ans.dropped_citations)} fabricated citation(s): "
-                f"{sorted(set(ans.dropped_citations))}"
+        try:
+            a = assistant()
+            # live knobs — applied per query without rebuilding the engine
+            a.cfg.retrieval.top_n = int(top_n)
+            a.cfg.retrieval.use_reranker = bool(use_reranker)
+            a.cfg.retrieval.exclude_section_types = (
+                [] if include_refs else ["sources", "literature"]
             )
-        if ans.uncited:
-            notes.append("⚠️ no valid citations — treat with caution.")
-        return ans.text, _format_sources(ans), " · ".join(notes)
+
+            ans = a.ask(question, language=language, model=model or None)
+
+            notes = []
+            t = ans.timing
+            notes.append(
+                f"**{ans.model}** · {ans.language} · embed {t['embed']:.1f}s · "
+                f"search {t['search']:.2f}s · rerank {t['rerank']:.1f}s"
+            )
+            if ans.dropped_citations:
+                notes.append(
+                    f"⚠️ stripped {len(ans.dropped_citations)} fabricated citation(s): "
+                    f"{sorted(set(ans.dropped_citations))}"
+                )
+            if ans.uncited:
+                notes.append("⚠️ no valid citations — treat with caution.")
+            # Second yield: final result, button unlocked.
+            yield ans.text, _format_sources(ans), " · ".join(notes), gr.update(interactive=True)
+        except Exception as e:  # noqa: BLE001
+            yield "", "", f"⚠️ Error: {e}", gr.update(interactive=True)
 
     with gr.Blocks(title="Православная энциклопедия — research assistant", css=CSS) as demo:
         gr.Markdown(
@@ -131,7 +159,13 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
         gr.Examples(examples=EXAMPLES, inputs=[question, language])
 
         inputs = [question, language, model, top_n, use_reranker, include_refs]
-        submit.click(answer, inputs=inputs, outputs=[out, srcs, status])
-        question.submit(answer, inputs=inputs, outputs=[out, srcs, status])
+        outputs = [out, srcs, status, submit]
+        # show_progress="hidden": we render our own pending state and
+        # drive the button's disabled/enabled state explicitly above, so
+        # Gradio's own per-output loading indicator would just be a second,
+        # independently-timed "processing" signal — the exact duplication/
+        # inconsistency this replaces.
+        submit.click(answer, inputs=inputs, outputs=outputs, show_progress="hidden")
+        question.submit(answer, inputs=inputs, outputs=outputs, show_progress="hidden")
 
     return demo

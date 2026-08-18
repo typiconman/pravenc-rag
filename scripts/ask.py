@@ -50,9 +50,39 @@ def _print_answer(ans) -> None:
 @app.command()
 def ui(config: str = "config.yaml", port: int = 7860, share: bool = False) -> None:
     """Launch the Gradio interface."""
+    # `server_port=<int>` pins Gradio to exactly that one port with no
+    # fallback — if a previous `pravenc-ask ui` was killed (e.g. OOM) and
+    # hasn't fully released it yet, launch() raises instead of retrying.
+    # Probe forward from the requested port (not Gradio's own default range,
+    # which may have nothing to do with what was asked for) for one that's
+    # actually free, then launch on it directly — launch() itself blocks
+    # until the server stops, so any fallback message has to happen first.
+    import socket
+
+    chosen = None
+    for candidate in range(port, port + 20):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", candidate))
+            chosen = candidate
+            break
+        except OSError:
+            continue
+        finally:
+            s.close()
+
+    if chosen is None:
+        typer.echo(f"Could not find a free port in {port}-{port + 19} — "
+                    f"pass a different --port or free one of these up.")
+        raise typer.Exit(1)
+    if chosen != port:
+        typer.echo(f"Port {port} is in use (a previous `pravenc-ask ui` may still "
+                    f"be shutting down) — using {chosen} instead.")
+
     from .app import build_ui
 
-    build_ui(config).launch(server_port=port, share=share, inbrowser=True)
+    build_ui(config).launch(server_port=chosen, share=share, inbrowser=True)
 
 
 @app.command()

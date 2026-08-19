@@ -111,6 +111,7 @@ class Source:
     pages: str | None
     url: str
     citation: str
+    doc_id: str = ""  # filename stem in pravenc-md/articles, e.g. "64730" -> "64730.md"
     score: float | None = None
 
 
@@ -335,6 +336,7 @@ class Assistant:
                     pages=md.get("page_numbers"),
                     url=md.get("source_url") or "",
                     citation=md.get("citation") or "",
+                    doc_id=md.get("doc_id") or "",
                     score=cnodes[i - 1].score,
                 )
             )

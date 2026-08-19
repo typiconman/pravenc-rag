@@ -19,12 +19,6 @@ CSS = """
 footer { display: none !important; }
 """
 
-EXAMPLES = [
-    ["Кто такой Алексий, человек Божий?", "auto"],
-    ["What is the hymnography of Alexius, Man of God?", "auto"],
-    ["Какие источники сообщают о сирийской версии жития?", "auto"],
-]
-
 PROCESSING_MESSAGES = [
     "Theologizing with confidence…",
     "Pontificating…",
@@ -32,6 +26,11 @@ PROCESSING_MESSAGES = [
     "Deducing boldly…",
     "Summoning the citations…",
 ]
+
+# The filename stem in this repo is the article id and equals the number in
+# source_url (see README); raw.githubusercontent.com serves the .md file
+# directly rather than GitHub's rendered blob page, so the link downloads.
+PRAVENC_MD_RAW_BASE = "https://raw.githubusercontent.com/slavonic/pravenc-md/main/articles"
 
 
 def _format_sources(ans) -> str:
@@ -47,8 +46,11 @@ def _format_sources(ans) -> str:
         loc_str = ", ".join(loc)
         head = f" — *{s.heading}*" if s.heading else ""
         score = f"  `{s.score:.3f}`" if s.score is not None else ""
+        md_link = (
+            f" · [↓ md]({PRAVENC_MD_RAW_BASE}/{s.doc_id}.md)" if s.doc_id else ""
+        )
         lines.append(
-            f"**[{s.n}]** [{s.title}]({s.url}){head}"
+            f"**[{s.n}]** [{s.title}]({s.url}){md_link}{head}"
             + (f"  \n<sub>{loc_str}</sub>" if loc_str else "")
             + score
         )
@@ -155,8 +157,6 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
             with gr.Column(scale=2):
                 gr.Markdown("#### Sources")
                 srcs = gr.Markdown()
-
-        gr.Examples(examples=EXAMPLES, inputs=[question, language])
 
         inputs = [question, language, model, top_n, use_reranker, include_refs]
         outputs = [out, srcs, status, submit]

@@ -256,6 +256,49 @@ under the 2G limit imposed by GitHub).
   If the string already shows `+cu124` but `cuda.is_available()` is `False`, the
   pod's NVIDIA driver is older than the CUDA build — check `nvidia-smi` and drop
   to `cu121` to match.
+- **UI: the "Processing…" state and disabled Ask button never appear when
+  served through nginx over HTTPS, but the final answer still shows up** —
+  nginx's default `proxy_buffering on` holds the whole streamed response and
+  flushes it in one shot at the end instead of forwarding each update as
+  `pravenc-ask ui`'s Gradio app produces it, so the two states arrive back-to-
+  back and only the last one ever gets painted. Plain HTTP (no proxy in the
+  path) streams fine, which is why this only shows up behind nginx. Fix in the
+  nginx `location` block proxying to Gradio:
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:7860;
+      proxy_buffering off;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+
+      proxy_read_timeout 300s;
+  }
+  ```
+
+  `proxy_buffering off` is what actually restores streaming; the rest keep the
+  proxied connection alive/correctly-labeled for it. Reload nginx after
+  editing (`nginx -t && systemctl reload nginx`).
+
+  Two things people commonly add here that are worth knowing about:
+  - **Don't add `proxy_set_header Upgrade $http_upgrade;`.** It's leftover
+    advice from older Gradio versions that used WebSocket; this one uses
+    Server-Sent Events instead (its client explicitly refuses to speak `ws`).
+    The header does nothing useful, and pairing it with `Connection ""` above
+    would actively break a real WebSocket upgrade if one were ever attempted,
+    since a proper upgrade needs `Connection: upgrade`, not an empty string.
+  - **`proxy_read_timeout` doesn't need to match or exceed `llm.request_timeout`
+    in `config.yaml`.** Gradio's `/queue/data` stream sends a heartbeat frame
+    every 15s (`GRADIO_HEARTBEAT_INTERVAL`) regardless of how long the actual
+    request is taking — the work runs in a worker thread, not on the event
+    loop that sends heartbeats. With `proxy_buffering off`, each heartbeat
+    reaches nginx immediately and resets its inactivity timer, so a value like
+    `300s` comfortably survives a `request_timeout: 900` generation.
 
 ## Notes
 

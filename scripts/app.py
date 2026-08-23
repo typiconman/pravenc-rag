@@ -7,7 +7,12 @@ query is the slow one.
 """
 from __future__ import annotations
 
+import atexit
 import random
+import re
+import shutil
+import tempfile
+from pathlib import Path
 
 import gradio as gr
 
@@ -57,14 +62,90 @@ def _format_sources(ans) -> str:
     return "\n\n".join(lines)
 
 
+def _slugify(text: str, max_len: int = 60) -> str:
+    text = re.sub(r"[^\w\s-]", "", text.strip().lower(), flags=re.UNICODE)
+    text = re.sub(r"[\s_-]+", "-", text).strip("-")
+    return text[:max_len].rstrip("-") or "answer"
+
+
+def _build_report(question: str, ans) -> str:
+    """The same answer + sources shown in the UI, as a standalone .md file."""
+    t = ans.timing
+    lines = [
+        f"# {question}",
+        "",
+        f"*{ans.model} · {ans.language} · embed {t['embed']:.1f}s · "
+        f"search {t['search']:.2f}s · rerank {t['rerank']:.1f}s · "
+        f"generate {t.get('generate', 0.0):.1f}s*",
+        "",
+        ans.text,
+        "",
+        "## Sources",
+        "",
+        _format_sources(ans),
+    ]
+    if ans.dropped_citations:
+        lines += [
+            "",
+            f"*Stripped {len(ans.dropped_citations)} fabricated citation(s): "
+            f"{sorted(set(ans.dropped_citations))}*",
+        ]
+    if ans.uncited:
+        lines += ["", "*No valid citations were returned — treat this answer with caution.*"]
+    return "\n".join(lines) + "\n"
+
+
+_REPORT_TEMP_DIRS: set[Path] = set()
+
+
+def _cleanup_report_temp_dirs() -> None:
+    """Backstop for whatever's still around when the process exits.
+
+    Steady-state cleanup happens in `answer()` (each new report deletes the
+    previous one), but the very last report written in a session, and any
+    left behind by an ungraceful shutdown, wouldn't otherwise be removed.
+    """
+    for d in list(_REPORT_TEMP_DIRS):
+        shutil.rmtree(d, ignore_errors=True)
+    _REPORT_TEMP_DIRS.clear()
+
+
+atexit.register(_cleanup_report_temp_dirs)
+
+
+def _write_report(question: str, ans) -> str:
+    # A fresh temp dir per answer, so the filename can be the question slug
+    # (Gradio serves the file under its actual basename) instead of a random
+    # tempfile name.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pravenc-ask-"))
+    _REPORT_TEMP_DIRS.add(tmp_dir)
+    path = tmp_dir / f"{_slugify(question)}.md"
+    path.write_text(_build_report(question, ans), encoding="utf-8")
+    return str(path)
+
+
 def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
     cfg = Config.load(config_path)
-    state = {"assistant": None}
+    state = {"assistant": None, "last_report_dir": None}
 
     def assistant() -> Assistant:
         if state["assistant"] is None:
             state["assistant"] = Assistant(cfg)
         return state["assistant"]
+
+    def write_report(question: str, ans) -> str:
+        """Write the new report, then drop the previous one.
+
+        Bounds disk use to at most one lingering report while the server is
+        running (the last one gets caught by the atexit cleanup instead).
+        """
+        path = _write_report(question, ans)
+        prev = state["last_report_dir"]
+        if prev is not None:
+            shutil.rmtree(prev, ignore_errors=True)
+            _REPORT_TEMP_DIRS.discard(prev)
+        state["last_report_dir"] = Path(path).parent
+        return path
 
     def answer(question: str, language: str, model: str, top_n: int,
                use_reranker: bool, include_refs: bool):
@@ -78,11 +159,13 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
         bookkeeping.
         """
         if not question.strip():
-            yield "", "", "", gr.update(interactive=True)
+            yield "", "", "", gr.update(interactive=True), gr.update(visible=False)
             return
 
-        # First yield: show pending state immediately and lock the button.
-        yield "", "", random.choice(PROCESSING_MESSAGES), gr.update(interactive=False)
+        # First yield: show pending state immediately, lock the button, and
+        # hide any download link left over from a previous answer.
+        yield ("", "", random.choice(PROCESSING_MESSAGES),
+               gr.update(interactive=False), gr.update(visible=False))
 
         try:
             a = assistant()
@@ -108,10 +191,12 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
                 )
             if ans.uncited:
                 notes.append("⚠️ no valid citations — treat with caution.")
-            # Second yield: final result, button unlocked.
-            yield ans.text, _format_sources(ans), " · ".join(notes), gr.update(interactive=True)
+            report_path = write_report(question, ans)
+            # Second yield: final result, button unlocked, download ready.
+            yield (ans.text, _format_sources(ans), " · ".join(notes),
+                   gr.update(interactive=True), gr.update(value=report_path, visible=True))
         except Exception as e:  # noqa: BLE001
-            yield "", "", f"⚠️ Error: {e}", gr.update(interactive=True)
+            yield "", "", f"⚠️ Error: {e}", gr.update(interactive=True), gr.update(visible=False)
 
     with gr.Blocks(title="Православная энциклопедия — research assistant", css=CSS) as demo:
         gr.Markdown(
@@ -158,8 +243,10 @@ def build_ui(config_path: str = "config.yaml") -> gr.Blocks:
                 gr.Markdown("#### Sources")
                 srcs = gr.Markdown()
 
+        download = gr.DownloadButton("⬇ Download answer (.md)", visible=False)
+
         inputs = [question, language, model, top_n, use_reranker, include_refs]
-        outputs = [out, srcs, status, submit]
+        outputs = [out, srcs, status, submit, download]
         # show_progress="hidden": we render our own pending state and
         # drive the button's disabled/enabled state explicitly above, so
         # Gradio's own per-output loading indicator would just be a second,
